@@ -39,7 +39,7 @@ import {
   sustainedDrive,
 } from './presets';
 import { MAX_POPULATION_SIZE } from './schema';
-import { PromptScan, parseCount, titleCase } from './text';
+import { PromptScan, isCountToken, parseCount, titleCase } from './text';
 import type { AiPlan, CircuitAction, NamedProjectionSpec, PopulationSpec } from './types';
 
 /** Default population sizes when the prompt gives no count. */
@@ -55,9 +55,20 @@ const SLOWER_WORDS = ['slower', 'slow-down', 'slow'];
 const RATE_WORDS = ['fire', 'fires', 'firing', 'spike', 'spikes', 'spiking', 'rate', 'rates', 'active', 'activity'];
 const CLEAR_VERBS = ['clear', 'reset', 'wipe', 'empty', 'erase', 'blank', 'start-over', 'from-scratch'];
 const CLEAR_OBJECTS = ['circuit', 'network', 'everything', 'all', 'scene', 'canvas', 'board', 'workspace', 'it', 'this'];
-const SWITCH_VERBS = ['switch', 'convert', 'change', 'turn', 'replace', 'swap', 'everything', 'every'];
+/** Verbs that ask for cells that already exist to be rebuilt with another model. */
+const MODEL_SWITCH_VERBS = ['switch', 'convert', 'change', 'turn', 'replace', 'swap'];
+const SWITCH_VERBS = [...MODEL_SWITCH_VERBS, 'everything', 'every'];
+/**
+ * Prepositions that introduce the model a switch moves to. A phrase in this
+ * position names a target model, never cells to build.
+ */
+const MODEL_SWITCH_GOVERNORS: ReadonlySet<string> = new Set(['to', 'into']);
 const RECURRENCE_WORDS = ['recurrent', 'recurrently', 'recurrence', 'circuit', 'network', 'microcircuit', 'loop', 'attractor'];
-const STIMULUS_TRIGGERS = ['stimulate', 'stimulus', 'stimuli', 'inject', 'injection', 'input', 'inputs', 'drive', 'driving'];
+const STIMULUS_TRIGGERS = [
+  'stimulate', 'stimulates', 'stimulated', 'stimulating', 'stimulus', 'stimuli',
+  'inject', 'injects', 'injected', 'injecting', 'injection',
+  'input', 'inputs', 'drive', 'drives', 'driven', 'driving',
+];
 const STIMULUS_PATTERN_WORDS = ['poisson', 'step', 'ramp', 'sine', 'sinusoidal', 'pulse-train', 'constant', 'tonic', 'train', 'pulses'];
 /** Words that sit between a verb and the noun phrase it governs. */
 const DETERMINERS: ReadonlySet<string> = new Set([
@@ -72,6 +83,13 @@ const CREATION_VERBS: ReadonlySet<string> = new Set([
   'add', 'append', 'build', 'create', 'generate', 'give', 'include', 'insert', 'instantiate',
   'place', 'put', 'spawn',
 ]);
+/**
+ * Head nouns that name a container rather than the cells in it, and so hand the
+ * count to a following "of" phrase: "a thalamic relay population of 300 cells".
+ */
+const CONTAINER_NOUNS: ReadonlySet<string> = new Set(['population', 'populations']);
+/** Ceiling on "N populations of …", so a typo cannot fill the document. */
+const MAX_REPEATED_POPULATIONS = 8;
 /** Words that say an edit applies to the whole circuit rather than one population. */
 const GLOBAL_SCOPE_WORDS = ['everything', 'every', 'all', 'both', 'each', 'entire', 'whole'];
 /** Words joining conjuncts that share a governing verb. */
@@ -429,7 +447,39 @@ class Planner {
       ) {
         start -= 1;
       }
-      const modifiers = this.scan.slice(start, head + 1);
+
+      // A container noun hands the size of the population to the phrase after
+      // "of": "a thalamic relay population of 300 cells" is 300 cells, not a
+      // default-sized relay population plus 300 more. Any count on the container
+      // itself counts populations rather than neurons, so it is taken out of the
+      // modifiers and used to repeat the draft. Extending is safe even when
+      // nothing comes of it: the merged modifiers are a superset of the inner
+      // phrase's own, so a phrase that drafts nothing still drafts nothing.
+      let modifiers = this.scan.slice(start, head + 1);
+      let repeat = 1;
+      if (
+        CONTAINER_NOUNS.has(word) &&
+        this.scan.word(head + 1) === 'of' &&
+        !this.scan.isClaimed(head + 1)
+      ) {
+        const inner = this.innerHeadNoun(head + 2);
+        if (inner !== -1) {
+          const containerCount = parseCount(modifiers);
+          const tail = this.scan.slice(head + 1, inner + 1);
+          if (containerCount === null) {
+            modifiers = [...modifiers, ...tail];
+          } else {
+            repeat = Math.min(containerCount, MAX_REPEATED_POPULATIONS);
+            if (containerCount > MAX_REPEATED_POPULATIONS) {
+              this.warn(
+                `Asking for ${containerCount} populations at once is more than the offline planner will build; ${MAX_REPEATED_POPULATIONS} were created.`,
+              );
+            }
+            modifiers = [...modifiers.filter((token) => !isCountToken(token)), ...tail];
+          }
+          head = inner;
+        }
+      }
 
       // The verb governing the phrase can sit behind a determiner the backwards
       // walk already stopped at: "remove the basket cells" boundaries on "the".
@@ -458,10 +508,23 @@ class Planner {
         continue;
       }
 
+      const count = parseCount(modifiers);
+
+      // "switch everything to Izhikevich neurons" names the model to move to, not
+      // cells to build. Left unclaimed, so `switchModel` reads it.
+      if (
+        count === null &&
+        MODEL_SWITCH_GOVERNORS.has(governing) &&
+        this.scan.hasAny(MODEL_SWITCH_VERBS) &&
+        modifiers.some((token) => MODEL_WORDS[token] !== undefined)
+      ) {
+        continue;
+      }
+
       // "Make the basket cells fire faster" names a population that already
       // exists; only a count or an explicit creation verb makes a phrase a
       // request for new neurons.
-      if (parseCount(modifiers) === null && !CREATION_VERBS.has(governing)) {
+      if (count === null && !CREATION_VERBS.has(governing)) {
         const referenced = this.referencedPopulation(modifiers);
         if (referenced !== null) {
           this.scan.claimRange(start, head + 1);
@@ -470,13 +533,36 @@ class Planner {
         }
       }
 
-      const draft = this.draftFromPhrase(modifiers, word, drafts);
+      const draft = this.draftFromPhrase(modifiers, this.scan.word(head), drafts);
       if (draft === null) continue;
       this.scan.claimRange(start, head + 1);
       drafts.push(draft);
+      // Each repeat is drafted rather than copied so it gets its own name and
+      // its own layout seed, which is what keeps the copies from overlapping.
+      for (let n = 1; n < repeat; n += 1) {
+        const copy = this.draftFromPhrase(modifiers, this.scan.word(head), drafts);
+        if (copy !== null) drafts.push(copy);
+      }
     }
     if (drafts.length === 0) return;
     this.emitPopulations(drafts);
+  }
+
+  /**
+   * The head noun of the phrase introduced by "of" after a container noun, or -1
+   * when what follows is not a plain modifier list ending in one. The window is
+   * short because a long run of words between the two nouns means the second is
+   * a separate phrase rather than the container's contents.
+   */
+  private innerHeadNoun(from: number): number {
+    const limit = Math.min(this.scan.length, from + 6);
+    for (let i = from; i < limit; i += 1) {
+      if (this.scan.isClaimed(i)) return -1;
+      const token = this.scan.word(i);
+      if (HEAD_NOUNS.has(token)) return i;
+      if (PHRASE_BOUNDARIES.has(token)) return -1;
+    }
+    return -1;
   }
 
   private draftFromPhrase(

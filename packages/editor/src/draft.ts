@@ -316,6 +316,14 @@ function attach(owner: Node, key: string, origin: Node, copy: Node): void {
 /**
  * Strip draft proxies out of a value on its way into the document, so a
  * reference read out of the draft can never end up stored inside it.
+ *
+ * The overwhelmingly common case is a value with no proxy anywhere in it — an
+ * array of document entities the caller assembled from the published circuit —
+ * and that case must cost nothing but the scan. The copy is therefore made
+ * lazily, on the first substitution rather than up front: rebuilding every node
+ * eagerly and throwing the rebuild away allocated one object per entity and per
+ * nested block, which on an 80 000-synapse assignment is 300 000 objects
+ * discarded to discover that nothing needed replacing.
  */
 function detach(value: unknown): unknown {
   if (!isContainer(value)) return value;
@@ -323,26 +331,26 @@ function detach(value: unknown): unknown {
   if (isContainer(raw)) return raw;
 
   if (Array.isArray(value)) {
-    let changed = false;
-    const out = new Array<unknown>(value.length);
+    let out: unknown[] | null = null;
     for (let i = 0; i < value.length; i += 1) {
       const item: unknown = value[i];
       const clean = detach(item);
-      if (clean !== item) changed = true;
+      if (clean === item) continue;
+      if (out === null) out = value.slice();
       out[i] = clean;
     }
-    return changed ? out : value;
+    return out ?? value;
   }
 
-  let changed = false;
-  const out: Node = {};
+  let out: Node | null = null;
   for (const key of Object.keys(value)) {
     const item = value[key];
     const clean = detach(item);
-    if (clean !== item) changed = true;
+    if (clean === item) continue;
+    if (out === null) out = { ...value };
     out[key] = clean;
   }
-  return changed ? out : value;
+  return out ?? value;
 }
 
 /* -------------------------------------------------------------------- diff -- */

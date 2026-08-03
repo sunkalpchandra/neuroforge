@@ -13,11 +13,26 @@ export const VARIANTS_PER_ARCHETYPE = 3;
 
 export const ARCHETYPE_COUNT = MORPHOLOGY_ARCHETYPES.length;
 
+/**
+ * Number of distinct glyphs the renderer can ever ask for. Every cache key is
+ * below this, which is what lets the glyph library hold all of them at once.
+ */
+export const VARIANT_COUNT = ARCHETYPE_COUNT * VARIANTS_PER_ARCHETYPE;
+
+/**
+ * `NeuronBuffers.archetype` is a `Uint8Array`, so it can hold codes no archetype
+ * corresponds to. Folding those onto the fallback here rather than at each use
+ * keeps the key space exactly `VARIANT_COUNT` wide: without it a stray code
+ * would mint its own cache entry for a glyph identical to the fallback's.
+ */
+export function archetypeCode(code: number): number {
+  const index = Math.floor(code);
+  return index >= 0 && index < ARCHETYPE_COUNT ? index : 0;
+}
+
 /** `NeuronBuffers.archetype` stores an index into `MORPHOLOGY_ARCHETYPES`. */
 export function archetypeName(code: number): MorphologyArchetype {
-  const index = Math.floor(code);
-  if (index >= 0 && index < ARCHETYPE_COUNT) return MORPHOLOGY_ARCHETYPES[index];
-  return MORPHOLOGY_ARCHETYPES[0];
+  return MORPHOLOGY_ARCHETYPES[archetypeCode(code)];
 }
 
 /** Seed bucket a neuron falls into. Identical buckets share one geometry. */
@@ -25,9 +40,9 @@ export function variantOf(seed: number): number {
   return (hashSeed(seed) >>> 0) % VARIANTS_PER_ARCHETYPE;
 }
 
-/** Stable cache key for an (archetype, bucket) pair. */
+/** Stable cache key for an (archetype, bucket) pair, always below `VARIANT_COUNT`. */
 export function variantKey(archetype: number, variant: number): number {
-  return archetype * VARIANTS_PER_ARCHETYPE + variant;
+  return archetypeCode(archetype) * VARIANTS_PER_ARCHETYPE + variant;
 }
 
 /**
@@ -56,7 +71,5 @@ function buildRadiusTable(): Float32Array {
 
 /** Soma radius for an archetype code, used for picking and selection halos. */
 export function somaRadiusForCode(code: number): number {
-  const index = Math.floor(code);
-  if (index >= 0 && index < ARCHETYPE_COUNT) return RADIUS_BY_ARCHETYPE[index];
-  return RADIUS_BY_ARCHETYPE[0];
+  return RADIUS_BY_ARCHETYPE[archetypeCode(code)];
 }

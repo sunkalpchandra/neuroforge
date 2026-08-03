@@ -5,6 +5,7 @@ import type { RenderSettings, SimulationBuffers } from '@neuroforge/shared';
 import { hashSeed } from '@neuroforge/math';
 import { RECEPTOR_LINEAR, linearColor, receptorOffset, viewportHeight } from './palette';
 import { arcLength, axonSag, chordLength, controlPoint, pointAt, tangentAt } from './axon-spline';
+import { growthCapacity } from './instancing';
 
 /**
  * Additive impulse particles emitted on spikes and advected along axons.
@@ -79,6 +80,8 @@ export class SpikeParticles extends THREE.Points {
   /** Prefix offsets into `#outList`, one per neuron slot plus a terminator. */
   #outStart = new Uint32Array(1);
   #outList = new Uint32Array(0);
+  /** Scatter cursors, parallel to `#outStart`; a field so a rebuild allocates nothing. */
+  #outCursor = new Uint32Array(1);
   #adjacencyNeurons = -1;
   #adjacencySynapses = -1;
   #adjacencySource: Uint32Array | null = null;
@@ -408,7 +411,13 @@ export class SpikeParticles extends THREE.Points {
 
     const n = neurons.count;
     const m = synapses.count;
-    if (this.#outStart.length < n + 2) this.#outStart = new Uint32Array(n + 2);
+    // Grown in blocks rather than to the exact size, so a network being built up
+    // one neuron at a time does not reallocate on every frame.
+    if (this.#outStart.length < n + 2) {
+      const cells = growthCapacity(n + 2, this.#outStart.length);
+      this.#outStart = new Uint32Array(cells);
+      this.#outCursor = new Uint32Array(cells);
+    }
     this.#outStart.fill(0);
 
     let total = 0;
@@ -421,9 +430,11 @@ export class SpikeParticles extends THREE.Points {
     for (let i = 0; i < n; i += 1) {
       this.#outStart[i + 1] += this.#outStart[i];
     }
-    if (this.#outList.length < total) this.#outList = new Uint32Array(total);
+    if (this.#outList.length < total) {
+      this.#outList = new Uint32Array(growthCapacity(total, this.#outList.length));
+    }
 
-    const cursor = new Uint32Array(n + 1);
+    const cursor = this.#outCursor;
     cursor.set(this.#outStart.subarray(0, n + 1));
     for (let i = 0; i < m; i += 1) {
       const pre = synapses.pre[i];

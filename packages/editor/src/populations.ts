@@ -82,10 +82,19 @@ export interface ProjectionSpec {
   plasticity?: PlasticityKind;
 }
 
-const DEFAULT_WEIGHT_MEAN = 1;
-const DEFAULT_WEIGHT_JITTER = 0.25;
-const DEFAULT_DELAY_MEAN = 1.5;
-const DEFAULT_DELAY_JITTER = 0.5;
+/**
+ * Fallbacks for the optional statistics on a `ProjectionSpec`.
+ *
+ * Exported because the `Projection` record the store files alongside the
+ * synapses is provenance: it has to say what was actually drawn. Resolving the
+ * same spec against two different sets of defaults would make the record
+ * describe a network that was never built, and re-wiring from it would silently
+ * produce a different one.
+ */
+export const DEFAULT_WEIGHT_MEAN = 1;
+export const DEFAULT_WEIGHT_JITTER = 0.25;
+export const DEFAULT_DELAY_MEAN = 1.5;
+export const DEFAULT_DELAY_JITTER = 0.5;
 
 /** Populations larger than this are refused rather than allowed to hang the tab. */
 const MAX_POPULATION_SIZE = 200000;

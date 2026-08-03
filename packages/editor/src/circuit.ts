@@ -21,7 +21,14 @@ import {
 
 import { newProjectionId } from './entities';
 import type { PopulationSpec, ProjectionSpec } from './populations';
-import { instantiatePopulation, instantiateProjection } from './populations';
+import {
+  DEFAULT_DELAY_JITTER,
+  DEFAULT_DELAY_MEAN,
+  DEFAULT_WEIGHT_JITTER,
+  DEFAULT_WEIGHT_MEAN,
+  instantiatePopulation,
+  instantiateProjection,
+} from './populations';
 
 /**
  * Both populations use the Izhikevich model. It has a hard peak-and-reset, so
@@ -212,10 +219,10 @@ export function createEmptyCircuit(name = 'Untitled circuit'): Circuit {
       source: spec.source,
       target: spec.target,
       rule: entry.rule,
-      weightMean: entry.weightMean ?? 1,
-      weightJitter: entry.weightJitter ?? 0,
-      delayMean: entry.delayMean ?? 1.5,
-      delayJitter: entry.delayJitter ?? 0,
+      weightMean: entry.weightMean ?? DEFAULT_WEIGHT_MEAN,
+      weightJitter: entry.weightJitter ?? DEFAULT_WEIGHT_JITTER,
+      delayMean: entry.delayMean ?? DEFAULT_DELAY_MEAN,
+      delayJitter: entry.delayJitter ?? DEFAULT_DELAY_JITTER,
     };
   });
 

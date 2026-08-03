@@ -199,6 +199,15 @@ export class CameraRig {
       this.#flight.step(step);
       this.#eye.set(this.#flight.x, this.#flight.y, this.#flight.z);
       this.#look.copy(this.#eye).addScaledVector(this.#forward, LOOK_AHEAD);
+      // The pivot keeps tracking the point the free camera is looking at, the
+      // mirror of the orbit branch tracking the eye below. Without it `getState`
+      // reports whatever the last orbit was aimed at, and reloading a document
+      // saved while flying restores a completely different heading.
+      const reach = this.#distance.value;
+      this.#focusX = this.#eye.x + this.#forward.x * reach;
+      this.#focusY = this.#eye.y + this.#forward.y * reach;
+      this.#focusZ = this.#eye.z + this.#forward.z * reach;
+      this.#focus.jump(this.#focusX, this.#focusY, this.#focusZ);
     } else {
       const distance = this.#distance.value;
       const cosPitch = Math.cos(this.#pitch.value);
@@ -240,6 +249,8 @@ export class CameraRig {
       MAX_DISTANCE,
     );
 
+    this.#placeFlightAround(centreX, centreY, centreZ, distance);
+
     if (duration <= 0) {
       this.#transition.active = false;
       this.#focusX = centreX;
@@ -270,6 +281,28 @@ export class CameraRig {
     if (distance !== undefined) {
       this.#distance.target = clamp(distance, MIN_DISTANCE, MAX_DISTANCE);
     }
+    this.#placeFlightAround(x, y, z, this.#distance.target);
+  }
+
+  /**
+   * Put the free-flight eye where an orbit of this radius about `(x,y,z)` would
+   * sit, leaving the heading alone.
+   *
+   * Framing is expressed as a pivot, but in `fly` and `first-person` the pivot
+   * is derived rather than driving, so a `frame()` or `focusOn()` issued in
+   * either mode would otherwise be silently inert. Only the spring target is
+   * written, so the camera glides rather than cuts, and holding a movement key
+   * still overrides it on the very next step.
+   */
+  #placeFlightAround(x: number, y: number, z: number, distance: number): void {
+    if (this.#mode !== 'fly' && this.#mode !== 'first-person') return;
+    this.#basisFromAngles();
+    this.#flyX = x - this.#forward.x * distance;
+    this.#flyY = y - this.#forward.y * distance;
+    this.#flyZ = z - this.#forward.z * distance;
+    this.#velocityX = 0;
+    this.#velocityY = 0;
+    this.#velocityZ = 0;
   }
 
   getState(): CameraState {

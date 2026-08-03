@@ -30,7 +30,14 @@ import { createEmptyCircuit } from './circuit';
 import { runDraft } from './draft';
 import { arcFor, distanceBetween, makeNeuron, makeSynapse, newProjectionId } from './entities';
 import type { PopulationSpec, ProjectionSpec } from './populations';
-import { instantiatePopulation, instantiateProjection } from './populations';
+import {
+  DEFAULT_DELAY_JITTER,
+  DEFAULT_DELAY_MEAN,
+  DEFAULT_WEIGHT_JITTER,
+  DEFAULT_WEIGHT_MEAN,
+  instantiatePopulation,
+  instantiateProjection,
+} from './populations';
 
 export type Tool = 'select' | 'place' | 'connect' | 'erase' | 'probe' | 'stimulate' | 'pan';
 
@@ -279,8 +286,14 @@ export const useEditor = create<EditorState & EditorActions>((set, get) => {
     addNeuron(partial) {
       const id = partial?.id ?? newNeuronId();
       const neuron = makeNeuron(id, partial);
+      // Built from the published document rather than from `draft.neurons`.
+      // Reading a collection out of the draft and spreading it materialises a
+      // proxy for every element the spread touches, which turns appending one
+      // entity into O(collection) proxies; the published array holds exactly the
+      // same values and costs one copy. The mutation is identical either way.
+      const neurons = [...get().circuit.neurons, neuron];
       edit('Add neuron', (draft) => {
-        draft.neurons = [...draft.neurons, neuron];
+        draft.neurons = neurons;
       });
       return id;
     },
@@ -373,8 +386,9 @@ export const useEditor = create<EditorState & EditorActions>((set, get) => {
         arc: arcFor(distanceBetween(from.position, to.position)),
         ...partial,
       });
+      const synapses = [...circuit.synapses, synapse];
       edit('Connect', (draft) => {
-        draft.synapses = [...draft.synapses, synapse];
+        draft.synapses = synapses;
       });
       return synapse.id;
     },
@@ -404,30 +418,38 @@ export const useEditor = create<EditorState & EditorActions>((set, get) => {
 
     addPopulation(spec) {
       const built = instantiatePopulation(spec);
+      const circuit = get().circuit;
+      const neurons = [...circuit.neurons, ...built.neurons];
+      const populations = [...circuit.populations, built.population];
       edit(`Add ${spec.name}`, (draft) => {
-        draft.neurons = [...draft.neurons, ...built.neurons];
-        draft.populations = [...draft.populations, built.population];
+        draft.neurons = neurons;
+        draft.populations = populations;
       });
       return built.population.id;
     },
 
     connectPopulations(spec) {
-      const synapses = instantiateProjection(spec, get().circuit);
-      if (synapses.length === 0) return;
+      const circuit = get().circuit;
+      const wired = instantiateProjection(spec, circuit);
+      if (wired.length === 0) return;
       const projection: Projection = {
         id: newProjectionId(),
         name: spec.name,
         source: spec.source,
         target: spec.target,
         rule: spec.rule,
-        weightMean: spec.weightMean ?? 1,
-        weightJitter: spec.weightJitter ?? 0,
-        delayMean: spec.delayMean ?? 1.5,
-        delayJitter: spec.delayJitter ?? 0,
+        // These must be the values `instantiateProjection` actually drew with,
+        // not zeroes: the record is what a re-wire replays from.
+        weightMean: spec.weightMean ?? DEFAULT_WEIGHT_MEAN,
+        weightJitter: spec.weightJitter ?? DEFAULT_WEIGHT_JITTER,
+        delayMean: spec.delayMean ?? DEFAULT_DELAY_MEAN,
+        delayJitter: spec.delayJitter ?? DEFAULT_DELAY_JITTER,
       };
+      const synapses = [...circuit.synapses, ...wired];
+      const projections = [...circuit.projections, projection];
       edit(`Connect ${spec.name}`, (draft) => {
-        draft.synapses = [...draft.synapses, ...synapses];
-        draft.projections = [...draft.projections, projection];
+        draft.synapses = synapses;
+        draft.projections = projections;
       });
     },
 

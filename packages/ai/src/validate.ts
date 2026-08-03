@@ -131,7 +131,13 @@ export function validatePlan(plan: AiPlan, circuit: Circuit): { plan: AiPlan; er
       model: population.params.kind,
     });
   }
-  const projections = new Set<string>(circuit.projections.map((p) => p.name.toLowerCase()));
+  // Keyed by lower-cased name so a plan can address a projection in any casing,
+  // and carrying the canonical name so the action it produces still matches the
+  // document exactly — the applier resolves projections by name.
+  const projections = new Map<string, string>();
+  for (const projection of circuit.projections) {
+    projections.set(projection.name.toLowerCase(), projection.name);
+  }
   let neuronBudget = circuit.neurons.length;
 
   const parsedActions = asArray(source.actions);
@@ -169,7 +175,7 @@ export function validatePlan(plan: AiPlan, circuit: Circuit): { plan: AiPlan; er
       case 'connect-populations': {
         const result = validateConnect(record, label, populations, projections, errors);
         if (result === null) break;
-        projections.add(result.spec.name.toLowerCase());
+        projections.set(result.spec.name.toLowerCase(), result.spec.name);
         actions.push(result);
         break;
       }
@@ -227,8 +233,17 @@ export function validatePlan(plan: AiPlan, circuit: Circuit): { plan: AiPlan; er
   };
 }
 
-/** A unique, length-bounded display name, suffixed when it collides. */
-function uniqueName(base: string, taken: ReadonlySet<string>, label: string, errors: string[]): string {
+/**
+ * A unique, length-bounded display name, suffixed when it collides. `taken` holds
+ * lower-cased names; both the population map and the projection map are keyed
+ * that way, so either can be passed without copying it into a set.
+ */
+function uniqueName(
+  base: string,
+  taken: { has(key: string): boolean },
+  label: string,
+  errors: string[],
+): string {
   if (!taken.has(base.toLowerCase())) return base;
   for (let n = 2; ; n += 1) {
     const candidate = `${base} ${n}`;
@@ -364,7 +379,7 @@ function validateCreatePopulation(
     layout = { kind: 'sphere', radius: clamp(2.6 * Math.cbrt(size), 4, 60), jitter: 0.35, seed };
   }
 
-  const name = uniqueName(rawName, new Set(populations.keys()), `${label} (create-population)`, errors);
+  const name = uniqueName(rawName, populations, `${label} (create-population)`, errors);
   const out: PopulationSpec = {
     name,
     size,
@@ -471,7 +486,7 @@ function validateConnect(
   record: Record<string, unknown>,
   label: string,
   populations: ReadonlyMap<string, KnownPopulation>,
-  projections: ReadonlySet<string>,
+  projections: ReadonlyMap<string, string>,
   errors: string[],
 ): { type: 'connect-populations'; spec: NamedProjectionSpec } | null {
   const spec = asRecord(record.spec);
@@ -751,7 +766,7 @@ function validateTunePopulation(
 function validateTuneProjection(
   record: Record<string, unknown>,
   label: string,
-  projections: ReadonlySet<string>,
+  projections: ReadonlyMap<string, string>,
   errors: string[],
 ): {
   type: 'tune-projection';
@@ -761,7 +776,10 @@ function validateTuneProjection(
   plasticity?: PlasticityKind;
 } | null {
   const raw = asText(record.name, MAX_PROJECTION_NAME_LENGTH);
-  if (raw === null || !projections.has(raw.toLowerCase())) {
+  // The action carries the document's own spelling, not the model's: the applier
+  // looks projections up by name, and a case-folded name would not be found.
+  const canonical = raw === null ? undefined : projections.get(raw.toLowerCase());
+  if (canonical === undefined) {
     errors.push(
       `${label} (tune-projection) referenced the unknown projection ${JSON.stringify(record.name)}; it was dropped.`,
     );
@@ -773,7 +791,7 @@ function validateTuneProjection(
     weightMean?: number;
     delayMean?: number;
     plasticity?: PlasticityKind;
-  } = { type: 'tune-projection', name: raw };
+  } = { type: 'tune-projection', name: canonical };
   let changed = false;
   if (record.weightMean !== undefined) {
     const weightMean = boundedNumber(record.weightMean, 0, 1000);
