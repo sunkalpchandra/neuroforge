@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { ToastViewport, pushToast } from '@neuroforge/ui';
 import {
   Activity,
@@ -89,6 +89,9 @@ export function Workspace() {
 
   // The renderer works in dense slots; the document works in ids. The engine
   // owns the mapping, so translation happens here rather than in either of them.
+  /** Extent the camera was last framed against, so re-framing is rare. */
+  const framedExtent = useRef<number | null>(null);
+
   const onPick = useCallback(
     (slot: number) => {
       if (slot < 0) {
@@ -109,6 +112,26 @@ export function Workspace() {
     getEngine().play();
     // load() zeroes the flag column, so the selection has to be republished.
     syncSelectionFlags(selection, hovered);
+
+    // Re-frame when the network's size changes materially — a prompt that builds
+    // a 200-cell circuit in place of a 75-cell one leaves the old camera either
+    // buried inside the new network or staring at a speck. Small edits are left
+    // alone so the view does not lurch every time a neuron is added by hand.
+    const bounds = boundsOf([]);
+    if (bounds) {
+      const extent = Math.max(
+        bounds.max[0] - bounds.min[0],
+        bounds.max[1] - bounds.min[1],
+        bounds.max[2] - bounds.min[2],
+      );
+      const previous = framedExtent.current;
+      const changed =
+        previous === null || extent > previous * 1.5 || extent < previous / 1.5;
+      if (changed && extent > 0) {
+        framedExtent.current = extent;
+        requestCameraFrame(bounds);
+      }
+    }
   }, [circuit.neurons, circuit.synapses, circuit.id, selection, hovered]);
 
   useEffect(() => {
