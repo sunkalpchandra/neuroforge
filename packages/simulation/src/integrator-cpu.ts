@@ -492,7 +492,7 @@ export class CpuIntegrator implements Integrator {
 
     for (let i = 0; i < count; i += 1) {
       const pBase = i * NEURON_PARAM_STRIDE;
-      let rest = 0;
+      let rest: number;
       switch (neurons.model[i]) {
         case MODEL_CODE.lif:
           rest = neurons.params[pBase + PARAM_SLOT.LIF_EL];
