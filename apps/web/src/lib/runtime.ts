@@ -145,6 +145,77 @@ export function boundsOf(ids: readonly string[]): FrameRequest | null {
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
 }
 
+/* ------------------------------------------------------- camera telemetry -- */
+
+export interface CameraTelemetry {
+  /** Distance from the eye to the orbit pivot, in world units. */
+  distance: number;
+  /** Vertical field of view in radians. */
+  fov: number;
+  /** Drawing buffer height in CSS pixels. */
+  viewportHeight: number;
+  /** World-space basis of the view, for the orientation gizmo. */
+  right: [number, number, number];
+  up: [number, number, number];
+  forward: [number, number, number];
+}
+
+const EMPTY_CAMERA: CameraTelemetry = {
+  distance: 1,
+  fov: 0.75,
+  viewportHeight: 1080,
+  right: [1, 0, 0],
+  up: [0, 1, 0],
+  forward: [0, 0, -1],
+};
+
+const cameraListeners = new Set<() => void>();
+let cameraSnapshot: CameraTelemetry = EMPTY_CAMERA;
+let lastCameraPublish = 0;
+
+/**
+ * Republished at 20 Hz rather than per frame.
+ *
+ * The scale bar and the orientation gizmo are the only consumers and neither is
+ * legible faster than that, whereas re-rendering them at 144 Hz would cost more
+ * than the readouts are worth.
+ */
+const CAMERA_INTERVAL_MS = 50;
+
+export function publishCamera(now: number, next: CameraTelemetry): void {
+  if (now - lastCameraPublish < CAMERA_INTERVAL_MS) return;
+  lastCameraPublish = now;
+  const previous = cameraSnapshot;
+  // Identity alone is useless here because the caller builds a fresh object each
+  // time, so compare the fields that actually move the readouts.
+  if (
+    Math.abs(previous.distance - next.distance) < 1e-3 &&
+    Math.abs(previous.forward[0] - next.forward[0]) < 1e-4 &&
+    Math.abs(previous.forward[1] - next.forward[1]) < 1e-4 &&
+    Math.abs(previous.forward[2] - next.forward[2]) < 1e-4 &&
+    previous.viewportHeight === next.viewportHeight
+  ) {
+    return;
+  }
+  cameraSnapshot = next;
+  for (const listener of cameraListeners) listener();
+}
+
+export function subscribeCamera(listener: () => void): () => void {
+  cameraListeners.add(listener);
+  return () => {
+    cameraListeners.delete(listener);
+  };
+}
+
+export function getCameraSnapshot(): CameraTelemetry {
+  return cameraSnapshot;
+}
+
+export function getCameraServerSnapshot(): CameraTelemetry {
+  return EMPTY_CAMERA;
+}
+
 /* ------------------------------------------------------------------ stats -- */
 
 type StatsListener = () => void;

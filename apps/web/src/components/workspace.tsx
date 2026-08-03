@@ -14,6 +14,7 @@ import { RasterPlot } from './analysis/raster-plot';
 import { LibraryPanel } from './library/library-panel';
 import { SelectionList } from './selection-list';
 import { ViewControls } from './view-controls';
+import { ViewportHud } from './viewport-hud';
 import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
@@ -179,6 +180,7 @@ export function Workspace() {
         <div className="pointer-events-none absolute inset-0">
           <AiBuilder />
           <Inspector />
+          <ViewportHud />
           <ViewControls />
           <NetworkAnalysis />
           <SearchPanel />

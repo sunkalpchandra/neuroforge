@@ -28,7 +28,13 @@ import { createIntegrator, requestComputeDevice } from '@neuroforge/simulation';
 import { COLORS, DEFAULT_RENDER_SETTINGS } from '@neuroforge/shared';
 import type { RenderSettings } from '@neuroforge/shared';
 
-import { consumeCameraFrame, getEngine, getProbes, publishStats } from '@/lib/runtime';
+import {
+  consumeCameraFrame,
+  getEngine,
+  getProbes,
+  publishCamera,
+  publishStats,
+} from '@/lib/runtime';
 
 export interface ViewportProps {
   render?: RenderSettings;
@@ -102,6 +108,23 @@ function Loop({
     gl.render(scene, camera);
     engine.recordFrame(performance.now() - frameStart);
     publishStats(frameStart);
+
+    // The HUD lives in the DOM and cannot reach the camera, so its inputs are
+    // published from here. The basis is read off matrixWorld: three.js cameras
+    // look down -Z, so the third column is backwards and has to be negated.
+    const rigState = fields.rig.getState();
+    const e = camera.matrixWorld.elements;
+    const dx = camera.position.x - rigState.target.x;
+    const dy = camera.position.y - rigState.target.y;
+    const dz = camera.position.z - rigState.target.z;
+    publishCamera(frameStart, {
+      distance: Math.max(1e-3, Math.hypot(dx, dy, dz)),
+      fov: ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 180,
+      viewportHeight: gl.domElement.clientHeight || 1080,
+      right: [e[0], e[1], e[2]],
+      up: [e[4], e[5], e[6]],
+      forward: [-e[8], -e[9], -e[10]],
+    });
   }, 1);
 
   return null;

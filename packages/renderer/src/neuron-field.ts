@@ -203,10 +203,20 @@ type PartStyle = {
   opacity: number;
 };
 
+/**
+ * Surfaces are matte and opaque, the way a segmentation mesh reads.
+ *
+ * A strong rim and a translucent membrane make a cell look like glass, and glass
+ * takes its colour from what is behind it — which in a dense field is other
+ * cells. The identity hue then stops being reliable exactly where the view is
+ * busiest and identity matters most. Emissive is untouched because it multiplies
+ * the spike envelope only, so a firing cell still flares against matte
+ * neighbours.
+ */
 const PART_STYLE: readonly PartStyle[] = [
-  { swell: 0.26, rim: 1.05, emissive: 3.4, roughness: 0.38, translucency: 0.55, opacity: 1 },
-  { swell: 0.1, rim: 0.7, emissive: 1.9, roughness: 0.55, translucency: 0.4, opacity: 0.96 },
-  { swell: 0.08, rim: 0.6, emissive: 1.5, roughness: 0.6, translucency: 0.32, opacity: 0.92 },
+  { swell: 0.26, rim: 0.5, emissive: 3.4, roughness: 0.62, translucency: 0.22, opacity: 1 },
+  { swell: 0.1, rim: 0.36, emissive: 1.9, roughness: 0.72, translucency: 0.16, opacity: 1 },
+  { swell: 0.08, rim: 0.3, emissive: 1.5, roughness: 0.78, translucency: 0.12, opacity: 1 },
 ];
 
 function createMaterial(part: number): THREE.ShaderMaterial {

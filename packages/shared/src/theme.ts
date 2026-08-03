@@ -193,20 +193,48 @@ export function hslToRgb(h: number, s: number, l: number): [number, number, numb
   ];
 }
 
+/** HSV to sRGB, all components in 0..1. */
+export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0:
+      return [v, t, p];
+    case 1:
+      return [q, v, p];
+    case 2:
+      return [p, v, t];
+    case 3:
+      return [p, q, v];
+    case 4:
+      return [t, p, v];
+    default:
+      return [v, p, q];
+  }
+}
+
 /**
  * The distinct colour a neuron is drawn in under `identity` mode.
  *
- * Saturation and lightness are jittered within a deliberately narrow band:
- * enough that adjacent hues stay separable, little enough that no cell is so
- * dark it disappears against the background or so pale it reads as selected.
+ * This reproduces Neuroglancer's segment colouring, which is what gives FlyWire
+ * its look: HSV with **value pinned to 1**, and saturation confined to the upper
+ * half of its range. Every cell is therefore drawn at full brightness, differing
+ * only in hue and in how washed it is. Deriving lightness from the hash instead —
+ * the obvious thing to do — produces a field where half the cells are dim, and
+ * dimness reads as depth or as deselection rather than as identity.
+ *
  * Returned in sRGB; the renderer converts to linear at upload.
  */
 export function identityColor(seed: number): [number, number, number] {
   const hash = mix32(seed);
+  // Hue is taken from a golden-ratio walk rather than straight from a hash byte:
+  // it spreads sequential ids further apart than 8 bits of hash alone can.
   const hue = (hash * PHI_CONJUGATE) % 1;
-  const saturation = 0.72 + ((hash >>> 8) & 0xff) / 255 * 0.24;
-  const lightness = 0.54 + ((hash >>> 16) & 0xff) / 255 * 0.14;
-  return hslToRgb(hue, saturation, lightness);
+  const saturation = 0.5 + ((hash >>> 8) & 0xff) / 255 * 0.5;
+  return hsvToRgb(hue, saturation, 1);
 }
 
 /** Hex form of `identityColor`, for swatches in the chrome. */
