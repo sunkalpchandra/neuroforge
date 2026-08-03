@@ -478,7 +478,11 @@ export interface ClusterRun {
   /** Group index each cluster is mostly made of, or -1 when the cluster is empty. */
   dominant: Int32Array;
   dominantShare: Float32Array;
-  /** Share of cells whose cluster's dominant population is their own. NaN when empty. */
+  /**
+   * Share of cells whose cluster's dominant population is their own. NaN when
+   * fewer than two populations carry members: agreement with a single label is
+   * unanimous by construction and would read as a perfect score.
+   */
   purity: number;
   /**
    * Normalised mutual information between the clustering and the user's
@@ -753,6 +757,17 @@ export class FingerprintClustering {
     let excluded = 0;
     for (let i = 0; i < count; i += 1) if (connected[i] === 0) excluded += 1;
 
+    let occupiedGroups = 0;
+    for (let index = 0; index < g; index += 1) {
+      for (let c = 0; c < this.k; c += 1) {
+        if (contingency[c * g + index] > 0) {
+          occupiedGroups += 1;
+          break;
+        }
+      }
+    }
+    const comparable = m > 0 && occupiedGroups >= 2;
+
     return {
       k: this.k,
       seed: this.seed,
@@ -769,7 +784,7 @@ export class FingerprintClustering {
       contingency,
       dominant,
       dominantShare,
-      purity: m > 0 ? matched / m : Number.NaN,
+      purity: comparable ? matched / m : Number.NaN,
       nmi: normalisedMutualInformation(contingency, sizes, g, m),
       computeMs: this.elapsed + (performance.now() - started),
     };

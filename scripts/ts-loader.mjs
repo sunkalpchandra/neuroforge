@@ -37,6 +37,13 @@ export async function resolve(specifier, context, nextResolve) {
     if (resolved) return nextResolve(pathToFileURL(resolved).href, context);
   }
 
+  // The app's own '@/...' alias, which otherwise only resolves inside Next.
+  if (specifier.startsWith('@/')) {
+    const appRoot = path.resolve(here, '..', 'apps', 'web', 'src');
+    const resolved = firstExisting(path.join(appRoot, specifier.slice(2)));
+    if (resolved) return nextResolve(pathToFileURL(resolved).href, context);
+  }
+
   // Extensionless relative imports.
   if (
     (specifier.startsWith('./') || specifier.startsWith('../')) &&

@@ -5,8 +5,11 @@ import { ToastViewport, pushToast } from '@neuroforge/ui';
 import {
   Activity,
   ChartNetwork,
+  Grid3x3,
+  Route,
   Search as SearchIcon,
   Share2,
+  Shapes,
   SlidersHorizontal,
   Sparkles,
 } from 'lucide-react';
@@ -17,6 +20,9 @@ import type { NeuronId } from '@neuroforge/shared';
 import { AiBuilder } from './builder/ai-builder';
 import { CommandPalette } from './command-palette';
 import { NetworkAnalysis } from './analysis/network-analysis';
+import { PathwaysPanel } from './analysis/pathways-panel';
+import { ConnectivityMatrix } from './analysis/connectivity-matrix';
+import { CellTypesPanel } from './analysis/cell-types-panel';
 import { SearchPanel } from './search/search-panel';
 import { RasterPlot } from './analysis/raster-plot';
 import { LibraryPanel } from './library/library-panel';
@@ -36,11 +42,14 @@ import { boundsOf, getEngine, requestCameraFrame, syncSelectionFlags } from '@/l
 const LEFT_DOCK: readonly DockEntry[] = [
   { tab: 'builder', title: 'AI builder', icon: <Sparkles />, render: () => <AiBuilder /> },
   { tab: 'search', title: 'Search cells', icon: <SearchIcon />, render: () => <SearchPanel /> },
+  { tab: 'cell-types', title: 'Cell types & clusters', icon: <Shapes />, render: () => <CellTypesPanel /> },
 ];
 
 const RIGHT_DOCK: readonly DockEntry[] = [
   { tab: 'inspector', title: 'Inspector', icon: <SlidersHorizontal />, render: () => <Inspector /> },
   { tab: 'analysis', title: 'Network analysis', icon: <ChartNetwork />, render: () => <NetworkAnalysis /> },
+  { tab: 'pathways', title: 'Pathways', icon: <Route />, render: () => <PathwaysPanel /> },
+  { tab: 'connectivity', title: 'Connectivity matrix', icon: <Grid3x3 />, render: () => <ConnectivityMatrix /> },
   { tab: 'library', title: 'Export & snapshots', icon: <Share2 />, render: () => <LibraryPanel /> },
 ];
 

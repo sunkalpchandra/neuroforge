@@ -271,11 +271,6 @@ export function edgeBetween(graph: PathGraph, from: number, to: number): number 
   return -1;
 }
 
-export function outDegree(graph: PathGraph, slot: number): number {
-  if (!isSlot(graph, slot)) return 0;
-  return graph.outStart[slot + 1] - graph.outStart[slot];
-}
-
 /**
  * Attach weights, delays and receptors to a slot sequence.
  *
