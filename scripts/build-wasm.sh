@@ -38,6 +38,12 @@ wasm-pack build "$CRATE" \
   --out-dir "$OUT" \
   --out-name neuroforge_core
 
+# wasm-pack writes a .gitignore into its output directory. The artifact here is
+# deliberately committed — the app imports it with a literal specifier so the
+# bundler can trace it — and leaving that file in place would silently untrack
+# the build output on the next commit.
+rm -f "$OUT/.gitignore"
+
 # Reclaim the target directory; the artifact in $OUT is the whole deliverable.
 cargo clean --manifest-path "$CRATE/Cargo.toml"
 
