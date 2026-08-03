@@ -1,5 +1,7 @@
 # NeuroForge
 
+**[sunkalpchandra.github.io/neuroforge](https://sunkalpchandra.github.io/neuroforge/)**
+
 Browser-native neural circuit CAD. Design spiking networks on an infinite canvas,
 simulate them with real biophysics, and watch the result render as glowing
 procedural neuron glyphs wired by spline axons carrying travelling impulses.
@@ -83,10 +85,26 @@ npm run wasm
 npm run lint
 npm run typecheck
 npm run build
+cargo test --manifest-path crates/neuroforge-core/Cargo.toml
 ```
 
-CI runs all three on every branch. `main` additionally deploys the static export
-to GitHub Pages.
+CI runs all of these on every branch. `main` additionally builds the WebAssembly
+core and deploys the static export to GitHub Pages.
+
+Beyond type and lint checks, the numerics are held to closed-form results rather
+than to snapshots:
+
+- LIF firing rate matches the analytic inter-spike interval to within 1%.
+- Hodgkin–Huxley rests at −65 mV and fires at a physiological rate for a step.
+- AdEx shows spike-frequency adaptation; conduction delays never deliver early.
+- STDP potentiates pre-before-post and depresses post-before-pre.
+- The WebAssembly core agrees with the TypeScript reference on spike counts for
+  all five models, gap junctions included.
+- Barnes-Hut forces stay within 0.3% of an exact N-body sum.
+- Frequency detection is exact from 7 to 120 Hz, which is what lets the builder
+  confirm it actually hit the gamma band.
+- Generated Brian2, NEST and PyTorch scripts parse as Python; the ONNX export is
+  a structurally valid protobuf.
 
 ## Deployment
 
