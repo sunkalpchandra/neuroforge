@@ -1,18 +1,106 @@
 'use client';
 
-import { COLORS } from '@neuroforge/shared';
+import { useEffect } from 'react';
+import { ToastViewport } from '@neuroforge/ui';
+import { buildShortcuts, useEditor } from '@neuroforge/editor';
+import { Autosaver } from '@neuroforge/io';
+
+import { StatusBar } from './status-bar';
+import { TopBar } from './top-bar';
+import { Viewport } from './viewport';
+import { getEngine } from '@/lib/runtime';
+
+/** Match a KeyboardEvent against a shortcut descriptor like "Mod+Shift+Z". */
+function matches(event: KeyboardEvent, keys: string): boolean {
+  const parts = keys.toLowerCase().split('+');
+  const key = parts[parts.length - 1];
+  const wantMod = parts.includes('mod');
+  const wantShift = parts.includes('shift');
+  const wantAlt = parts.includes('alt');
+
+  // Mod is Cmd on macOS and Ctrl elsewhere; accepting either would make Ctrl+Z
+  // fire alongside Cmd+Z on a Mac and undo twice. navigator.platform is
+  // deprecated, so this reads the user agent instead.
+  const isMac =
+    typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+  const mod = isMac ? event.metaKey : event.ctrlKey;
+
+  if (wantMod !== mod) return false;
+  if (wantShift !== event.shiftKey) return false;
+  if (wantAlt !== event.altKey) return false;
+
+  const pressed = event.key.toLowerCase();
+  if (key === 'space') return pressed === ' ';
+  if (key === 'delete') return pressed === 'delete' || pressed === 'backspace';
+  return pressed === key;
+}
 
 /**
- * Temporary shell used to validate the build pipeline. Replaced by the real
- * workspace composition once the panel packages land.
+ * The entire application.
+ *
+ * There is no routing: every surface is a panel composited over a canvas that
+ * never unmounts, which is what keeps the simulation and the GPU resources alive
+ * across every interaction.
  */
 export function Workspace() {
+  const circuit = useEditor((s) => s.circuit);
+  const loadCircuit = useEditor((s) => s.loadCircuit);
+
+  // Push the document into the engine whenever its structure changes. The
+  // engine rebuilds its buffers, so this must not run on every parameter tweak —
+  // the identity of the neuron and synapse arrays is the structural signal.
+  useEffect(() => {
+    getEngine().load(circuit);
+    getEngine().play();
+  }, [circuit.neurons, circuit.synapses, circuit.id]);
+
+  useEffect(() => {
+    const shortcuts = buildShortcuts();
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      // Never steal keys from a field the user is typing into.
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      for (const shortcut of shortcuts) {
+        if (matches(event, shortcut.keys)) {
+          event.preventDefault();
+          shortcut.run();
+          return;
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const autosaver = new Autosaver(1500);
+    autosaver.start(
+      () => useEditor.getState().circuit,
+      () => undefined,
+    );
+    const unsubscribe = useEditor.subscribe(() => autosaver.touch());
+    return () => {
+      unsubscribe();
+      void autosaver.flush();
+      autosaver.stop();
+    };
+  }, []);
+
   return (
-    <main
-      className="flex h-dvh w-dvw items-center justify-center"
-      style={{ backgroundColor: COLORS.background }}
-    >
-      <p className="nf-numeric text-sm text-ink-muted">NeuroForge</p>
-    </main>
+    <div className="flex h-dvh w-dvw flex-col overflow-hidden bg-bg">
+      <TopBar />
+      <main className="relative flex-1 overflow-hidden">
+        <Viewport render={circuit.render} />
+      </main>
+      <StatusBar />
+      <ToastViewport position="bottom-right" />
+    </div>
   );
 }
