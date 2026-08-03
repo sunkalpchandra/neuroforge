@@ -1,0 +1,162 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4 is configured in CSS. Every token here mirrors packages/shared
+ * src/theme.ts, which the renderer reads for the 3D scene — the two must stay
+ * in sync or the chrome and the canvas drift apart.
+ */
+@theme {
+  --color-bg: #07090b;
+  --color-panel: #101418;
+  --color-panel-raised: #151a20;
+  --color-hairline: rgb(255 255 255 / 0.05);
+  --color-hairline-strong: rgb(255 255 255 / 0.1);
+  --color-ink: #f5f7fa;
+  --color-ink-muted: #8a93a0;
+  --color-ink-faint: #5a626d;
+  --color-accent: #4fd1ff;
+  --color-accent-dim: #2b8fb5;
+  --color-secondary: #b66bff;
+  --color-secondary-dim: #7c48b0;
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-danger: #fb7185;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, 'SF Mono', monospace;
+
+  --radius-panel: 0.75rem;
+  --radius-control: 0.5rem;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-quart: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --shadow-panel: 0 1px 0 0 rgb(255 255 255 / 0.04) inset,
+    0 24px 64px -24px rgb(0 0 0 / 0.85);
+  --shadow-float: 0 1px 0 0 rgb(255 255 255 / 0.06) inset,
+    0 32px 80px -20px rgb(0 0 0 / 0.9);
+}
+
+/*
+ * SF Pro-style optical spacing: tighten tracking as size grows, which is what
+ * makes large type read as designed rather than defaulted.
+ */
+@layer base {
+  :root {
+    color-scheme: dark;
+    --nf-topbar-h: 48px;
+    --nf-statusbar-h: 28px;
+  }
+
+  html,
+  body {
+    height: 100%;
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01', 'tnum';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    overscroll-behavior: none;
+  }
+
+  body {
+    /* The 3D canvas owns the viewport; nothing outside it scrolls. */
+    overflow: hidden;
+    margin: 0;
+  }
+
+  h1 {
+    letter-spacing: -0.028em;
+  }
+  h2 {
+    letter-spacing: -0.022em;
+  }
+  h3 {
+    letter-spacing: -0.016em;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 32%, transparent);
+    color: var(--color-ink);
+  }
+
+  /* Thin, unobtrusive scrollbars that match the panel language. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 0.12) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.1);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 0.18);
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* Focus is always visible for keyboard users, never for pointer users. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /*
+   * The glass surface used by every floating panel. Backdrop blur is composited
+   * on the GPU, and the inset hairline is what sells the depth.
+   */
+  .nf-glass {
+    background: color-mix(in srgb, var(--color-panel) 72%, transparent);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border: 1px solid var(--color-hairline);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .nf-glass-raised {
+    background: color-mix(in srgb, var(--color-panel-raised) 80%, transparent);
+    backdrop-filter: blur(32px) saturate(180%);
+    -webkit-backdrop-filter: blur(32px) saturate(180%);
+    border: 1px solid var(--color-hairline-strong);
+    box-shadow: var(--shadow-float);
+  }
+
+  /* Numeric readouts: tabular figures so values do not jitter as they change. */
+  .nf-numeric {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum', 'zero';
+  }
+}
+
+@layer utilities {
+  /* Promote to its own compositor layer without the paint cost of will-change. */
+  .nf-gpu {
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  .nf-no-drag {
+    -webkit-user-drag: none;
+    user-select: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

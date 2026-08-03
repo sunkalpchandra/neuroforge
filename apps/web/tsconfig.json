@@ -1,0 +1,38 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./src/*"],
+      "@neuroforge/shared": ["../../packages/shared/src/index.ts"],
+      "@neuroforge/shared/*": ["../../packages/shared/src/*"],
+      "@neuroforge/math": ["../../packages/math/src/index.ts"],
+      "@neuroforge/math/*": ["../../packages/math/src/*"],
+      "@neuroforge/shaders": ["../../packages/shaders/src/index.ts"],
+      "@neuroforge/shaders/*": ["../../packages/shaders/src/*"],
+      "@neuroforge/simulation": ["../../packages/simulation/src/index.ts"],
+      "@neuroforge/simulation/*": ["../../packages/simulation/src/*"],
+      "@neuroforge/renderer": ["../../packages/renderer/src/index.ts"],
+      "@neuroforge/renderer/*": ["../../packages/renderer/src/*"],
+      "@neuroforge/physics": ["../../packages/physics/src/index.ts"],
+      "@neuroforge/physics/*": ["../../packages/physics/src/*"],
+      "@neuroforge/editor": ["../../packages/editor/src/index.ts"],
+      "@neuroforge/editor/*": ["../../packages/editor/src/*"],
+      "@neuroforge/io": ["../../packages/io/src/index.ts"],
+      "@neuroforge/io/*": ["../../packages/io/src/*"],
+      "@neuroforge/ai": ["../../packages/ai/src/index.ts"],
+      "@neuroforge/ai/*": ["../../packages/ai/src/*"],
+      "@neuroforge/ui": ["../../packages/ui/src/index.ts"],
+      "@neuroforge/ui/*": ["../../packages/ui/src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    "../../packages/**/*.ts",
+    "../../packages/**/*.tsx"
+  ],
+  "exclude": ["node_modules"]
+}

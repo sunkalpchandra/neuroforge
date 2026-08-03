@@ -1,0 +1,31 @@
+{
+  "name": "neuroforge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser-native neural circuit CAD with real-time GPU simulation",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "wasm": "bash scripts/build-wasm.sh",
+    "clean": "rm -rf .turbo apps/web/.next apps/web/out node_modules/.cache"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.19.4",
+    "eslint": "^10.8.0",
+    "turbo": "^2.10.8",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.66.0"
+  }
+}
