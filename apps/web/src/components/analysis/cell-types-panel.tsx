@@ -964,19 +964,28 @@ function ClustersSection({ prints, groups, onSelectCluster }: ClustersSectionPro
       label="Clusters"
       aside={
         run !== null ? (
-          <Tooltip
-            content={
-              run.converged
-                ? `Assignments stopped moving after ${grouped(run.iterations)} iterations.`
-                : `Still moving ${grouped(run.unsettled)} cells when the ${grouped(
-                    run.maxIterations,
-                  )}-iteration cap was reached. Treat the split as provisional.`
-            }
-          >
-            <Badge variant={run.converged ? 'success' : 'warning'} size="sm" tabIndex={0}>
-              {run.converged ? 'converged' : 'capped'}
-            </Badge>
-          </Tooltip>
+          <>
+            <Tooltip
+              content={`Seeded at 0x${run.seed.toString(16)}, so the same circuit and the same k always produce the same clusters.`}
+            >
+              <Badge variant="outline" size="sm" numeric tabIndex={0}>
+                {grouped(run.iterations)} iter
+              </Badge>
+            </Tooltip>
+            <Tooltip
+              content={
+                run.converged
+                  ? `Assignments stopped moving after ${grouped(run.iterations)} iterations.`
+                  : `Still moving ${grouped(run.unsettled)} cells when the ${grouped(
+                      run.maxIterations,
+                    )}-iteration cap was reached. Treat the split as provisional.`
+              }
+            >
+              <Badge variant={run.converged ? 'success' : 'warning'} size="sm" tabIndex={0}>
+                {run.converged ? 'converged' : 'capped'}
+              </Badge>
+            </Tooltip>
+          </>
         ) : undefined
       }
     >

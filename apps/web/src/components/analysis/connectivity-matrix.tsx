@@ -821,12 +821,18 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
   const hasDataRef = useRef(false);
   const viewRef = useRef<{ mode: Grouping; subset: readonly NeuronId[] } | null>(null);
   const documentRef = useRef<Pick<Circuit, 'neurons' | 'synapses' | 'populations'> | null>(null);
+  const wantedModeRef = useRef<Grouping>(mode);
 
   // The by-neuron view is defined by the selection; the by-population view is
   // not, and must not rebuild every time the user clicks a cell.
   const subset = mode === 'neuron' ? selection : EMPTY_SELECTION;
 
   const build = useCallback(() => {
+    // The latch below can only be held between scheduling the frame and running
+    // it, so a request that arrives while it is held is absorbed by the pass
+    // that has not run yet rather than dropped — which is what stops a grouping
+    // change made in the same frame as an edit from being silently ignored.
+    wantedModeRef.current = mode;
     if (busyRef.current) return;
     busyRef.current = true;
     setPending(true);
@@ -839,14 +845,15 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       try {
         const engine = getEngine();
         const state = useEditor.getState();
+        const wanted = wantedModeRef.current;
         // Stamped before the pass, so a build that throws cannot leave the poll
         // below retrying the same failing matrix twice a second.
         signatureRef.current = graphSignature(engine.buffers);
         const next = buildMatrix(
           engine,
           state.circuit,
-          mode,
-          mode === 'neuron' ? state.selection : EMPTY_SELECTION,
+          wanted,
+          wanted === 'neuron' ? state.selection : EMPTY_SELECTION,
         );
         costRef.current = next.buildMs;
         hasDataRef.current = true;
@@ -1173,7 +1180,9 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
               ? 'A connection probability has no sign — switch to Σw or mean to colour by excitation and inhibition.'
               : 'Colour by net signed weight, inhibitory presynaptic cells counting negative. Switches the scale from sequential to diverging.'
           }
-          checked={showSign}
+          // Reflects what the scale is actually doing, not the remembered
+          // preference: with `p` selected the matrix has no sign to show.
+          checked={diverging}
           disabled={metric === 'prob'}
           onChange={setShowSign}
         />
@@ -1197,6 +1206,7 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
     return (
       <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
         {header}
+        {controls}
         {error === null ? (
           <EmptyState
             icon={<Spinner size={18} />}
@@ -1224,7 +1234,7 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       ? 'No neurons yet — place cells and wire them together, and their connectivity appears here.'
       : count === 0
         ? 'Nothing to group. Select the cells whose adjacency you want to read.'
-        : mode === 'population' && count < 2
+        : data.mode === 'population' && count < 2
           ? 'This circuit has no populations to compare — group by neuron to read the raw adjacency.'
           : unavailable
             ? 'This browser would not give the matrix a 2D canvas, so it cannot be drawn.'
@@ -1256,7 +1266,7 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       <div
         ref={hostRef}
         tabIndex={0}
-        aria-label={`Connectivity matrix, ${count} by ${count}, grouped by ${mode}, ${grouped(
+        aria-label={`Connectivity matrix, ${count} by ${count}, grouped by ${data.mode}, ${grouped(
           data.shownEdges,
         )} synapses. Arrow keys move the cursor, enter selects the cells involved.`}
         onPointerMove={trackPointer}

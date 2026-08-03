@@ -7,6 +7,8 @@ import {
   ChartNetwork,
   Grid3x3,
   Route,
+  Waves,
+  Zap,
   Search as SearchIcon,
   Share2,
   Shapes,
@@ -23,6 +25,8 @@ import { NetworkAnalysis } from './analysis/network-analysis';
 import { PathwaysPanel } from './analysis/pathways-panel';
 import { ConnectivityMatrix } from './analysis/connectivity-matrix';
 import { CellTypesPanel } from './analysis/cell-types-panel';
+import { EphysPanel } from './experiments/ephys-panel';
+import { NetworkExperimentsPanel } from './experiments/network-experiments-panel';
 import { SearchPanel } from './search/search-panel';
 import { RasterPlot } from './analysis/raster-plot';
 import { LibraryPanel } from './library/library-panel';
@@ -50,6 +54,8 @@ const RIGHT_DOCK: readonly DockEntry[] = [
   { tab: 'analysis', title: 'Network analysis', icon: <ChartNetwork />, render: () => <NetworkAnalysis /> },
   { tab: 'pathways', title: 'Pathways', icon: <Route />, render: () => <PathwaysPanel /> },
   { tab: 'connectivity', title: 'Connectivity matrix', icon: <Grid3x3 />, render: () => <ConnectivityMatrix /> },
+  { tab: 'ephys', title: 'Patch clamp', icon: <Zap />, render: () => <EphysPanel /> },
+  { tab: 'network-experiments', title: 'Network experiments', icon: <Waves />, render: () => <NetworkExperimentsPanel /> },
   { tab: 'library', title: 'Export & snapshots', icon: <Share2 />, render: () => <LibraryPanel /> },
 ];
 

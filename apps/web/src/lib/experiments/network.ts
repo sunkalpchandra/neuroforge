@@ -685,7 +685,8 @@ export function topHubSlots(buffers: SimulationBuffers, count: number): number[]
   return computeGraphMetrics(buffers, count).hubs.map((hub) => hub.slot);
 }
 
-function randomSlots(circuit: Circuit, count: number, seed: number): number[] {
+/** A reproducible random sample of the enabled cells; the same seed always hits the same set. */
+export function randomSlotSample(circuit: Circuit, count: number, seed: number): number[] {
   const pool: number[] = [];
   for (let i = 0; i < circuit.neurons.length; i += 1) {
     if (circuit.neurons[i].enabled) pool.push(i);
@@ -1063,7 +1064,7 @@ export async function runLesion(
       throw new Error('This circuit has no connections, so it has no hubs. Ablate the selection or a random sample instead.');
     }
   } else {
-    ablated = randomSlots(circuit, params.size, params.seed);
+    ablated = randomSlotSample(circuit, params.size, params.seed);
     if (ablated.length === 0) {
       throw new Error('There are no enabled cells to sample.');
     }
