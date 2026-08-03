@@ -65,11 +65,21 @@ const SWITCH_VERBS = [...MODEL_SWITCH_VERBS, 'everything', 'every'];
  */
 const MODEL_SWITCH_GOVERNORS: ReadonlySet<string> = new Set(['to', 'into']);
 const RECURRENCE_WORDS = ['recurrent', 'recurrently', 'recurrence', 'circuit', 'network', 'microcircuit', 'loop', 'attractor'];
-const STIMULUS_TRIGGERS = [
-  'stimulate', 'stimulates', 'stimulated', 'stimulating', 'stimulus', 'stimuli',
-  'inject', 'injects', 'injected', 'injecting', 'injection',
-  'input', 'inputs', 'drive', 'drives', 'driven', 'driving',
+/** Drive verbs that take their target directly, as an object. */
+const STIMULUS_ACTIVE_VERBS = [
+  'stimulate', 'stimulates', 'stimulating',
+  'inject', 'injects', 'injecting',
+  'drive', 'drives', 'driving',
 ];
+const STIMULUS_TRIGGERS = [
+  ...STIMULUS_ACTIVE_VERBS,
+  'stimulated', 'stimulus', 'stimuli', 'injected', 'injection', 'input', 'inputs', 'driven',
+];
+const TARGET_PHRASE = String.raw`\s+([\s\S]{1,60}?)(?=\s+(?:with|at|using|and|by)\b|[.;!?]|$)`;
+const STIMULUS_TARGET_RE = new RegExp(String.raw`\b(?:to|into|onto)` + TARGET_PHRASE);
+const STIMULUS_VERB_TARGET_RE = new RegExp(
+  String.raw`\b(?:` + STIMULUS_ACTIVE_VERBS.join('|') + `)` + TARGET_PHRASE,
+);
 const STIMULUS_PATTERN_WORDS = ['poisson', 'step', 'ramp', 'sine', 'sinusoidal', 'pulse-train', 'constant', 'tonic', 'train', 'pulses'];
 /** Words that sit between a verb and the noun phrase it governs. */
 const DETERMINERS: ReadonlySet<string> = new Set([
@@ -115,6 +125,18 @@ const SENTENCE_ENDS: ReadonlySet<string> = new Set(['.', ';', '!', '?', 'then'])
  * likely to be pointing at existing cells than asking for new ones.
  */
 const REFERENCE_SCORE = 2;
+
+/** Words that point back at something already named instead of naming it. */
+const ANAPHORA: ReadonlySet<string> = new Set([
+  'a', 'all', 'an', 'both', 'each', 'it', 'one', 'ones', 'that', 'the', 'them', 'these', 'they',
+  'this', 'those',
+]);
+
+/** True when a phrase names nothing of its own and only points back. */
+function isAnaphoric(phrase: string): boolean {
+  const words = phrase.toLowerCase().match(WORD_RE) ?? [];
+  return words.length > 0 && words.every((word) => ANAPHORA.has(word));
+}
 
 /**
  * How much a word naming an attribute says about a population: it counts for the
@@ -536,10 +558,12 @@ class Planner {
       // exists; only a count or an explicit creation verb makes a phrase a
       // request for new neurons.
       if (count === null && !CREATION_VERBS.has(governing)) {
-        const referenced = this.referencedPopulation(modifiers);
-        if (referenced !== null) {
+        const referenced = this.referencedPopulations(modifiers);
+        if (referenced.length > 0) {
           this.scan.claimRange(start, head + 1);
-          if (!this.focus.includes(referenced)) this.focus.push(referenced);
+          for (const population of referenced) {
+            if (!this.focus.includes(population)) this.focus.push(population);
+          }
           continue;
         }
       }
@@ -823,27 +847,30 @@ class Planner {
   }
 
   /**
-   * The population a phrase points at, when it points at exactly one that the
-   * document already holds. Populations this plan creates are excluded: a phrase
-   * cannot be referring to something that did not exist when it was written.
+   * The populations a phrase points at among those the document already holds.
+   * Populations this plan creates are excluded: a phrase cannot be referring to
+   * something that did not exist when it was written.
+   *
+   * Every population sharing the best score is returned, because a phrase can
+   * legitimately name more than one — "the cortical neurons" describes the
+   * excitatory and inhibitory halves of a cortex equally well, and answering
+   * with one of them, or with none, would both be wrong.
    */
-  private referencedPopulation(words: readonly string[]): KnownPopulation | null {
+  private referencedPopulations(words: readonly string[]): KnownPopulation[] {
     const phrase = words.join(' ');
-    let best: KnownPopulation | null = null;
+    let best: KnownPopulation[] = [];
     let bestScore = 0;
-    let tied = false;
     for (const candidate of this.populations) {
       if (candidate.planned) continue;
       const score = this.matchScore(candidate, words, phrase);
       if (score > bestScore) {
         bestScore = score;
-        best = candidate;
-        tied = false;
+        best = [candidate];
       } else if (score === bestScore && score > 0) {
-        tied = true;
+        best.push(candidate);
       }
     }
-    return bestScore >= REFERENCE_SCORE && !tied ? best : null;
+    return bestScore >= REFERENCE_SCORE ? best : [];
   }
 
   /**
@@ -960,6 +987,20 @@ class Planner {
     return fitted;
   }
 
+  /**
+   * The highest connection probability this projection can carry and still fit
+   * the per-projection synapse cap. Never below 0.001, which the largest pair of
+   * populations the validator allows still fits comfortably.
+   */
+  private probabilityCeiling(projection: KnownProjection): number {
+    const source = this.populations.find((p) => p.name === projection.sourceName);
+    const target = this.populations.find((p) => p.name === projection.targetName);
+    if (source === undefined || target === undefined) return 1;
+    const pairs = source.size * target.size;
+    if (pairs === 0) return 1;
+    return clamp(Math.floor((MAX_SYNAPSES_PER_PROJECTION / pairs) * 1000) / 1000, 0.001, 1);
+  }
+
   private connect(
     source: KnownPopulation,
     target: KnownPopulation,
@@ -1062,16 +1103,19 @@ class Planner {
     if (!this.scan.hasAny(SWITCH_VERBS)) return;
     this.scan.claim(index);
     this.claimWords(SWITCH_VERBS);
+    // Claimed before the empty-circuit exit below, because the request was
+    // understood either way; reporting "everything" as unread on top of saying
+    // there is nothing to switch would contradict it.
+    if (this.focus.length === 0 && this.scan.hasAny(GLOBAL_SCOPE_WORDS)) {
+      this.claimWords(GLOBAL_SCOPE_WORDS);
+      this.claimHeadNouns();
+    }
 
     if (this.populations.length === 0) {
       this.warn(`There are no populations to switch to ${NEURON_MODEL_LABELS[kind]}.`);
       return;
     }
     const targets = this.focusedPopulations();
-    if (targets === this.populations && this.scan.hasAny(GLOBAL_SCOPE_WORDS)) {
-      this.claimWords(GLOBAL_SCOPE_WORDS);
-      this.claimHeadNouns();
-    }
     let changed = 0;
     for (const population of targets) {
       if (population.model === kind) continue;
@@ -1087,7 +1131,10 @@ class Planner {
     // different thing from failing to understand it, and the generic
     // "not understood" fallback would report the wrong one.
     if (changed === 0) {
-      const scope = targets === this.populations ? 'Every population' : targets[0].name;
+      const scope =
+        targets === this.populations
+          ? 'Every population'
+          : targets.map((population) => population.name).join(', ');
       this.warn(`${scope} already uses ${NEURON_MODEL_LABELS[kind]}; nothing to change.`);
     }
   }
@@ -1254,13 +1301,18 @@ class Planner {
     for (const projection of this.projections) {
       if (projection.spec !== null) {
         const rule = projection.spec.rule;
+        // Densifying is still bounded by the synapse cap: scaling a rule past it
+        // would only have the whole projection dropped by the validator.
+        const ceiling = this.probabilityCeiling(projection);
         if (rule.kind === 'random' || rule.kind === 'distance-threshold') {
-          rule.probability = Math.round(clamp(rule.probability * factor, 0.001, 1) * 1000) / 1000;
+          rule.probability =
+            Math.round(clamp(rule.probability * factor, 0.001, ceiling) * 1000) / 1000;
           touched += 1;
           continue;
         }
         if (rule.kind === 'gaussian') {
-          rule.maxProbability = Math.round(clamp(rule.maxProbability * factor, 0.001, 1) * 1000) / 1000;
+          rule.maxProbability =
+            Math.round(clamp(rule.maxProbability * factor, 0.001, ceiling) * 1000) / 1000;
           touched += 1;
           continue;
         }
@@ -1397,7 +1449,10 @@ class Planner {
   private applyStimulus(request: StimulusRequest | null): void {
     if (request === null) return;
     const named = request.targetText === null ? null : this.resolvePopulation(request.targetText);
-    if (named === null && request.targetText !== null) {
+    // "drive them" points back at the cells just built rather than failing to
+    // name any, so the subject fallback below is the right answer, not a
+    // second-best one worth warning about.
+    if (named === null && request.targetText !== null && !isAnaphoric(request.targetText)) {
       this.warn(
         `Could not tell which population "${request.targetText.trim()}" refers to, so the drive was attached to the largest one instead.`,
       );
@@ -1447,7 +1502,7 @@ class Planner {
     if (this.focus.length === 0 || this.focusUsed) return;
     const names = this.focus.map((population) => population.name).join(', ');
     this.warn(
-      `${names} was read as a reference to cells the circuit already has, but the request did not say what to change about it.`,
+      `${names} ${this.focus.length === 1 ? 'was' : 'were'} read as a reference to cells the circuit already has, but the request did not say what to change about ${this.focus.length === 1 ? 'it' : 'them'}.`,
     );
   }
 
