@@ -40,7 +40,14 @@ import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
 import { Viewport } from './viewport';
-import { boundsOf, getEngine, requestCameraFrame, syncSelectionFlags } from '@/lib/runtime';
+import {
+  boundsOf,
+  getEngine,
+  requestCameraFrame,
+  requestCameraState,
+  syncSelectionFlags,
+} from '@/lib/runtime';
+import { readSceneFromLocation, writeSceneToLocation } from '@/lib/scene-url';
 
 
 const LEFT_DOCK: readonly DockEntry[] = [
@@ -234,6 +241,78 @@ export function Workspace() {
     togglePanel('library', leftActive === 'library' || rightActive === 'library');
     togglePanel('inspector', rightActive === 'inspector');
   }, [leftActive, rightActive, togglePanel]);
+
+
+  const setRenderSettings = useEditor((s) => s.setRenderSettings);
+  const openDock = useDock((s) => s.open);
+  const collapseDock = useDock((s) => s.collapse);
+  /** Suppresses the URL writer until an inbound link has been applied. */
+  const restored = useRef(false);
+
+  // Restore a shared view once, before anything else writes to the address bar.
+  useEffect(() => {
+    const scene = readSceneFromLocation();
+    restored.current = true;
+    if (!scene) return;
+
+    setRenderSettings(scene.render);
+    requestCameraState({ ...scene.camera });
+
+    // Ids are document-specific, exactly as segment ids are in Neuroglancer, so a
+    // link opened against a different circuit restores the view but not the
+    // selection, and says so rather than silently selecting nothing.
+    const current = useEditor.getState().circuit;
+    if (scene.circuitId === current.id) {
+      const live = new Set<string>(current.neurons.map((n) => n.id));
+      const kept = scene.selection.filter((id) => live.has(id)) as NeuronId[];
+      if (kept.length > 0) select(kept);
+      if (kept.length < scene.selection.length) {
+        pushToast({
+          tone: 'warning',
+          title: 'Some cells no longer exist',
+          description: `${scene.selection.length - kept.length} of ${scene.selection.length} selected cells were not found.`,
+        });
+      }
+      if (scene.selectionTruncated) {
+        pushToast({
+          tone: 'warning',
+          title: 'Selection was clipped',
+          description: 'The shared link exceeded the size a URL can carry.',
+        });
+      }
+    } else if (scene.selection.length > 0) {
+      pushToast({
+        tone: 'warning',
+        title: 'Link is for a different circuit',
+        description: 'The camera and display settings were restored; the selection was not.',
+      });
+    }
+
+    if (scene.docks.left) openDock('left', scene.docks.left);
+    else collapseDock('left');
+    if (scene.docks.right) openDock('right', scene.docks.right);
+    else collapseDock('right');
+    if (scene.docks.bottom) openDock('bottom', scene.docks.bottom);
+    else collapseDock('bottom');
+  }, [collapseDock, openDock, select, setRenderSettings]);
+
+  // Keep the address bar current. Debounced because orbiting produces a camera
+  // update every frame and history.replaceState is not free.
+  const bottomActive = useDock((s) => s.bottom.active);
+  useEffect(() => {
+    if (!restored.current) return;
+    const id = setTimeout(() => {
+      writeSceneToLocation({
+        circuitId: circuit.id,
+        camera: circuit.camera,
+        selection,
+        selectionTruncated: false,
+        render: circuit.render,
+        docks: { left: leftActive, right: rightActive, bottom: bottomActive },
+      });
+    }, 400);
+    return () => clearTimeout(id);
+  }, [circuit.id, circuit.camera, circuit.render, selection, leftActive, rightActive, bottomActive]);
 
   useEffect(() => {
     const autosaver = new Autosaver(1500);

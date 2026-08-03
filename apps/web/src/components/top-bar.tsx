@@ -8,6 +8,7 @@ import {
   Hand,
   MousePointer2,
   Redo2,
+  Link2,
   Share2,
   Sparkles,
   SlidersHorizontal,
@@ -15,9 +16,10 @@ import {
   Waypoints,
   Zap,
 } from 'lucide-react';
-import { IconButton, Separator, Tooltip } from '@neuroforge/ui';
+import { IconButton, Separator, Tooltip, pushToast } from '@neuroforge/ui';
 import { useEditor } from '@neuroforge/editor';
 import { useDock } from '@/lib/dock-store';
+import { sceneLink } from '@/lib/scene-url';
 import type { Tool } from '@neuroforge/editor';
 
 import { Transport } from './transport';
@@ -54,6 +56,40 @@ export function TopBar() {
   const inspectorOpen = rightActive === 'inspector';
 
   const openPalette = useCallback(() => togglePanel('commandPalette', true), [togglePanel]);
+
+  const bottomActive = useDock((s) => s.bottom.active);
+  const circuit = useEditor((s) => s.circuit);
+  const selection = useEditor((s) => s.selection);
+
+  const copyLink = useCallback(() => {
+    const url = sceneLink({
+      circuitId: circuit.id,
+      camera: circuit.camera,
+      selection,
+      selectionTruncated: false,
+      render: circuit.render,
+      docks: { left: leftActive, right: rightActive, bottom: bottomActive },
+    });
+    // clipboard.writeText rejects without a secure context or user gesture; the
+    // click is a gesture, but a page served over plain http is not secure, and
+    // failing silently would look like the button does nothing.
+    void navigator.clipboard
+      .writeText(url)
+      .then(() =>
+        pushToast({
+          tone: 'success',
+          title: 'View link copied',
+          description: 'Camera, selection and display settings are in the link.',
+        }),
+      )
+      .catch(() =>
+        pushToast({
+          tone: 'danger',
+          title: 'Could not copy',
+          description: 'Clipboard access was refused; the link is in the address bar.',
+        }),
+      );
+  }, [circuit, selection, leftActive, rightActive, bottomActive]);
 
   return (
     <header className="nf-glass relative z-30 flex h-[var(--nf-topbar-h)] items-center gap-2 border-b border-hairline px-3">
@@ -135,6 +171,12 @@ export function TopBar() {
           onClick={() => toggleDock('right', 'inspector')}
         >
           <SlidersHorizontal />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip content="Copy a link to this exact view">
+        <IconButton label="Copy view link" size="sm" onClick={copyLink}>
+          <Link2 />
         </IconButton>
       </Tooltip>
 

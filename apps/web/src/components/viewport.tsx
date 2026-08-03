@@ -31,6 +31,7 @@ import type { RenderSettings } from '@neuroforge/shared';
 
 import {
   consumeCameraFrame,
+  consumeCameraState,
   getEngine,
   getProbes,
   publishCamera,
@@ -81,6 +82,9 @@ function Loop({
 
     // Framing is requested from outside the scene graph; the rig is only
     // reachable here, so the request is picked up at the top of the frame.
+    const pose = consumeCameraState();
+    if (pose) fields.rig.setState(pose, true);
+
     const framing = consumeCameraFrame();
     if (framing) {
       fields.rig.frame(

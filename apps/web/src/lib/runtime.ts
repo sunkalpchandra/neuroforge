@@ -1,6 +1,6 @@
 import { ProbeRecorder, SimulationEngine } from '@neuroforge/simulation';
 import { ForceLayout } from '@neuroforge/physics';
-import type { FrameStats } from '@neuroforge/shared';
+import type { CameraState, FrameStats } from '@neuroforge/shared';
 import { EMPTY_FRAME_STATS, NEURON_FLAG } from '@neuroforge/shared';
 
 import { buildFingerprints, fingerprintSignature } from './similarity';
@@ -146,6 +146,25 @@ export function boundsOf(ids: readonly string[]): FrameRequest | null {
 
   if (found === 0) return null;
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
+let pendingCameraState: CameraState | null = null;
+
+/**
+ * Ask the camera to jump to an exact pose, as a shared link does.
+ *
+ * Distinct from requestCameraFrame: framing eases onto a bounding box, whereas
+ * restoring a link must land on precisely the pose that was shared, or the view
+ * a colleague opens is not the view that was sent.
+ */
+export function requestCameraState(state: CameraState): void {
+  pendingCameraState = state;
+}
+
+export function consumeCameraState(): CameraState | null {
+  const state = pendingCameraState;
+  pendingCameraState = null;
+  return state;
 }
 
 /* ------------------------------------------------------------ fingerprints -- */
