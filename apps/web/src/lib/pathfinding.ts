@@ -665,55 +665,39 @@ export function reachableWithin(
     };
   }
 
-  const frontier = new Uint32Array(graph.n);
-  const next = new Uint32Array(graph.n);
+  let current = new Uint32Array(graph.n);
+  let buffer = new Uint32Array(graph.n);
   let frontierLength = 1;
-  frontier[0] = source;
+  current[0] = source;
   depth[source] = 0;
   sizes[0] = 1;
 
   let total = 1;
   let visited = 1;
   let truncated = false;
-  let current: Uint32Array = frontier;
-  let buffer: Uint32Array = next;
 
-  for (let level = 1; level <= horizon && frontierLength > 0; level += 1) {
+  for (let level = 1; level <= horizon && frontierLength > 0 && !truncated; level += 1) {
     let nextLength = 0;
     for (let i = 0; i < frontierLength; i += 1) {
       const u = current[i];
       const end = graph.outStart[u + 1];
       for (let e = graph.outStart[u]; e < end; e += 1) {
+        visited += 1;
         const v = graph.outTarget[e];
         if (depth[v] !== -1) continue;
         depth[v] = level;
         buffer[nextLength] = v;
         nextLength += 1;
         total += 1;
-        visited += 1;
       }
       if (visited >= budget) {
+        // The layer is left incomplete rather than the next one being built on
+        // a partial frontier, which would misreport later depths as small.
         truncated = true;
         break;
       }
     }
     sizes[level] = nextLength;
-    if (truncated) {
-      // The layer is incomplete, so it is reported as far as it got and the
-      // walk stops rather than building the next one on a partial frontier.
-      cumulative[level] = total;
-      for (let rest = level + 1; rest <= horizon; rest += 1) cumulative[rest] = total;
-      return {
-        depth,
-        sizes,
-        cumulative,
-        total,
-        hops: horizon,
-        truncated,
-        visited,
-        computeMs: performance.now() - started,
-      };
-    }
     const swap = current;
     current = buffer;
     buffer = swap;
@@ -738,14 +722,13 @@ export function reachableWithin(
   };
 }
 
-/** Slots reached at or before `hops`, in breadth order. Excludes the source. */
+/** Slots reached at or before `hops`, the source included. */
 export function reachedSlots(reach: ReachResult, hops: number): number[] {
   const limit = Math.max(0, Math.min(reach.hops, Math.floor(hops)));
   const slots: number[] = [];
-  for (let level = 1; level <= limit; level += 1) {
-    for (let slot = 0; slot < reach.depth.length; slot += 1) {
-      if (reach.depth[slot] === level) slots.push(slot);
-    }
+  for (let slot = 0; slot < reach.depth.length; slot += 1) {
+    const at = reach.depth[slot];
+    if (at >= 0 && at <= limit) slots.push(slot);
   }
   return slots;
 }

@@ -15,6 +15,8 @@ import {
 } from '@neuroforge/shared';
 import type { ColorMode, RenderPreset, RenderSettings } from '@neuroforge/shared';
 
+import { ColorLegend } from './color-legend';
+
 /** Layer toggles, in the order they stack visually in the scene. */
 const LAYERS: { key: keyof RenderSettings; label: string }[] = [
   { key: 'showDendrites', label: 'Dendrites' },
@@ -92,6 +94,8 @@ export function ViewControls() {
           );
         })}
       </div>
+
+      <ColorLegend />
 
       {expanded ? (
         <div className="border-t border-hairline px-2 py-2">
