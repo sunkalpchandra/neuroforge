@@ -25,6 +25,13 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Test simulation core
+        run: cargo test --release --manifest-path crates/neuroforge-core/Cargo.toml
+
       - name: Lint
         run: npm run lint
 

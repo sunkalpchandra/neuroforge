@@ -1,0 +1,20 @@
+[package]
+name = "neuroforge-core"
+version = "0.1.0"
+edition = "2024"
+description = "Native simulation core for NeuroForge: membrane models, synapses, plasticity and topology analysis."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2.126"
+petgraph = { version = "0.8.3", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

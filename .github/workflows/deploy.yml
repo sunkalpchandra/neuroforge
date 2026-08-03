@@ -30,6 +30,21 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        # The prebuilt binary; `cargo install wasm-pack` compiles it from source
+        # and costs well over a minute.
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build simulation core
+        # The artifact is gitignored, so the deployed site only gets the WASM
+        # backend if CI produces it. Without this the app silently falls back to
+        # the TypeScript integrator.
+        run: npm run wasm
+
       - name: Build static export
         run: npm run build
         env:
