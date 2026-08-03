@@ -189,7 +189,13 @@ const LESION_OPTIONS: readonly SegmentedOption<LesionTarget>[] = [
   { value: 'random', label: 'random', title: 'Ablate a deterministic random sample' },
 ];
 
-type ResultSet = Partial<Record<ProtocolKey, ExperimentResult>>;
+interface ResultEntry {
+  result: ExperimentResult;
+  /** Document revision the measurement was taken at; see `revision` below. */
+  revision: number;
+}
+
+type ResultSet = Partial<Record<ProtocolKey, ResultEntry>>;
 
 type Status = 'idle' | 'running' | 'done' | 'cancelled' | 'error';
 
@@ -240,6 +246,15 @@ export function NetworkExperimentsPanel({
       abortRef.current?.abort();
     };
   }, []);
+
+  // The editor drafts copy-on-write, so any edit to a cell or a synapse replaces
+  // these arrays. A result measured before that edit describes a network that no
+  // longer exists, and saying so is better than either discarding the work or
+  // presenting it as current.
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    setRevision((previous) => previous + 1);
+  }, [circuit.neurons, circuit.synapses]);
 
   /* ------------------------------------------------------------ previews -- */
 
@@ -311,14 +326,31 @@ export function NetworkExperimentsPanel({
       return 'Select the cells to ablate, or ablate hubs or a random sample instead.';
     }
     if (protocol === 'transfer') {
-      if (inputSlots.length === 0) return 'The input population is empty.';
-      if (outputSlots.length === 0) return 'The readout population is empty.';
+      if (inputSlots.length === 0) {
+        return transfer.input.kind === 'selection'
+          ? 'Nothing is selected to drive. Select cells, or pick a population.'
+          : 'The driven population is empty.';
+      }
+      if (outputSlots.length === 0) {
+        return transfer.outputExcludesInput
+          ? 'Every cell in the readout is also driven; there is nothing left to measure.'
+          : 'The readout population is empty.';
+      }
     }
     if (protocol === 'perturbation' && circuit.synapses.length === 0) {
       return 'A perturbation cannot propagate through a circuit with no synapses.';
     }
     return null;
-  }, [circuit, protocol, lesion.target, selection, inputSlots, outputSlots]);
+  }, [
+    circuit,
+    protocol,
+    lesion.target,
+    selection,
+    inputSlots,
+    outputSlots,
+    transfer.input.kind,
+    transfer.outputExcludesInput,
+  ]);
 
   /* ----------------------------------------------------------------- run -- */
 
@@ -369,7 +401,7 @@ export function NetworkExperimentsPanel({
       .then((result) => {
         // A superseded run must not publish over the one that replaced it.
         if (!mountedRef.current || abortRef.current !== controller) return;
-        setResults((previous) => ({ ...previous, [protocol]: result }));
+        setResults((previous) => ({ ...previous, [protocol]: { result, revision } }));
         setStatus('done');
         abortRef.current = null;
       })
@@ -383,7 +415,7 @@ export function NetworkExperimentsPanel({
         setError(cause instanceof Error ? cause.message : String(cause));
         setStatus('error');
       });
-  }, [protocol, circuit, rhythm, lesion, transfer, perturbation, selection]);
+  }, [protocol, circuit, rhythm, lesion, transfer, perturbation, selection, revision]);
 
   const selectCell = useCallback(
     (cell: CellRef) => {
@@ -404,7 +436,9 @@ export function NetworkExperimentsPanel({
   if (!open) return null;
 
   const running = status === 'running';
-  const result = results[protocol];
+  const entry = results[protocol];
+  const result = entry?.result;
+  const stale = entry !== undefined && entry.revision !== revision;
   const placement = className ?? 'absolute top-3 right-3 bottom-3 w-[372px]';
 
   return (
@@ -429,6 +463,12 @@ export function NetworkExperimentsPanel({
               <Badge variant="danger" size="sm">
                 failed
               </Badge>
+            ) : stale ? (
+              <Tooltip content="The circuit changed after this measurement. Run it again to bring the numbers back in step.">
+                <Badge variant="warning" size="sm" tabIndex={0}>
+                  stale
+                </Badge>
+              </Tooltip>
             ) : result !== undefined ? (
               <Tooltip content="Wall-clock time the last run of this protocol took">
                 <Badge variant="outline" size="sm" numeric tabIndex={0}>
@@ -591,6 +631,14 @@ export function NetworkExperimentsPanel({
         </PanelSection>
 
         <Separator />
+
+        {stale ? (
+          <p className="flex items-start gap-1.5 px-3 pt-2 text-[10px] leading-snug text-warning/90">
+            <TriangleAlert size={10} aria-hidden className="mt-[2px] shrink-0" />
+            The circuit changed after this measurement — everything below describes the network as
+            it was.
+          </p>
+        ) : null}
 
         {result === undefined ? (
           <EmptyState

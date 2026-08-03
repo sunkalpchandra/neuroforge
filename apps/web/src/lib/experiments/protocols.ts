@@ -41,6 +41,8 @@ const MAX_STIM_DOUBLINGS = 18;
 const STIM_SEED_PA = 50;
 /** Quiescent period held before the first stimulus of a paired-pulse trial (ms). */
 const PPR_SETTLE_MS = 50;
+/** Width of the stimulus pulse; it is cut short the moment the cell fires (ms). */
+const PPR_PULSE_MS = 2;
 
 export const MIN_DT = 0.005;
 export const MAX_DT = 1;
@@ -369,6 +371,18 @@ export function sweepLevels(from: number, to: number, step: number, cap: number)
 /** Number of conditions `sweepLevels` will actually produce, for a live readout. */
 export function sweepCount(from: number, to: number, step: number, cap: number): number {
   return sweepLevels(from, to, step, cap).length;
+}
+
+/**
+ * Levels a rheobase search will integrate: both bracket checks plus the
+ * bisections needed to halve the bracket down to the tolerance. Exported so the
+ * progress total and the estimate a caller shows before running cannot drift
+ * apart.
+ */
+export function rheobaseProbeEstimate(low: number, high: number, tolerance: number): number {
+  const width = Math.abs(high - low);
+  const grain = Math.max(1e-4, Math.abs(tolerance));
+  return 2 + Math.max(1, Math.min(MAX_BISECTIONS, Math.ceil(Math.log2(Math.max(1, width / grain)))));
 }
 
 function linearFit(xs: readonly number[], ys: readonly number[]): LinearFit | null {
@@ -1301,7 +1315,6 @@ export async function runPairedPulse(
   let simulatedMs = 0;
   let holdingPa: number;
 
-  const stimulusMs = Math.max(params.dt, 2);
   const total = 1 + intervals.length * trials * 2;
 
   try {
@@ -1313,14 +1326,14 @@ export async function runPairedPulse(
     await condition(options, 0, total, 'calibrating stimulus');
 
     const preSteps = stepsFor(PPR_SETTLE_MS, dt);
-    const pulseSteps = Math.max(1, stepsFor(stimulusMs, dt));
+    const pulseSteps = Math.max(1, stepsFor(PPR_PULSE_MS, dt));
     const windowSteps = Math.max(1, stepsFor(params.windowMs, dt));
 
     // A cell that fires on its own cannot be paired-pulse stimulated: there is no
     // way to say which spike belongs to which pulse. The check runs for as long
     // as the longest trial will, so a slow drift into firing is caught too.
     const quietMs =
-      PPR_SETTLE_MS + intervals[intervals.length - 1] + stimulusMs + params.windowMs;
+      PPR_SETTLE_MS + intervals[intervals.length - 1] + PPR_PULSE_MS + params.windowMs;
     engine.reset();
     settle(engine, quietMs);
     if (buffers.neurons.spikeCount[preSlot] > 0) {
@@ -1478,7 +1491,7 @@ export async function runPairedPulse(
       info.stpEnabled
         ? `STP: u ${csvNumber(info.stpU)}, tauRec ${csvNumber(info.tauRecMs)} ms, tauFacil ${csvNumber(info.tauFacilMs)} ms`
         : 'STP: disabled — the ratio is 1 by construction',
-      `stimulus: ${csvNumber(stimulusPa)} pA for ${csvNumber(stimulusMs)} ms, ${trials} trial(s) per interval`,
+      `stimulus: ${csvNumber(stimulusPa)} pA for ${csvNumber(PPR_PULSE_MS)} ms, ${trials} trial(s) per interval`,
     ]),
     'interval_ms,peak1_nS,peak2_nS,ratio,trials_evoked',
     ...points.map((point) =>
@@ -1499,7 +1512,7 @@ export async function runPairedPulse(
     synapse: info,
     points,
     stimulusPa,
-    stimulusMs,
+    stimulusMs: PPR_PULSE_MS,
     csv,
   };
 }
@@ -1534,8 +1547,7 @@ export async function runRheobase(
   let low = lowStart;
   let high = highStart;
 
-  const estimate =
-    2 + Math.max(1, Math.ceil(Math.log2(Math.max(1, (highStart - lowStart) / tolerance))));
+  const estimate = rheobaseProbeEstimate(lowStart, highStart, tolerance);
 
   try {
     const { engine, slot, holdingPa } = rig;

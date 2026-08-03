@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Activity, GitBranch, Sliders, Zap } from 'lucide-react';
 import {
   Badge,
@@ -29,12 +29,14 @@ import {
   RECEPTOR_LABELS,
   defaultParams,
   voltageRange,
+  identityColorHex,
 } from '@neuroforge/shared';
 import type { NeuronId, NeuronModelKind } from '@neuroforge/shared';
 
-import { getEngine } from '@/lib/runtime';
+import { getEngine, getFingerprints } from '@/lib/runtime';
 import { fixed, grouped, millivolts } from '@/lib/format';
 import { useLiveNeuron } from '@/hooks/use-live-neuron';
+import { similarCells } from '@/lib/similarity';
 import { PARAM_FIELDS, readParam, writeParam } from './param-fields';
 
 const EMPTY_TRACE = new Float32Array(0);
@@ -51,6 +53,7 @@ export function Inspector() {
   const selection = useEditor((s) => s.selection);
   const circuit = useEditor((s) => s.circuit);
   const updateNeuron = useEditor((s) => s.updateNeuron);
+  const select = useEditor((s) => s.select);
 
   const selectedId: NeuronId | null = selection.length > 0 ? selection[0] : null;
   const neuron = useMemo(
@@ -72,6 +75,27 @@ export function Inspector() {
     const outgoing = circuit.synapses.filter((s) => s.source === selectedId);
     return { incoming, outgoing };
   }, [circuit.synapses, selectedId]);
+
+  // Cells whose connectivity fingerprint points the same way as this one's.
+  // This is how connectomics identifies a cell type without a label, and it is
+  // the question the inspector is otherwise unable to answer.
+  const similar = useMemo(() => {
+    if (slot < 0) return [];
+    const prints = getFingerprints(circuit.populations.length);
+    return similarCells(prints, slot, 8);
+  }, [slot, circuit.populations.length, circuit.synapses]);
+
+  const [labelDraft, setLabelDraft] = useState('');
+  useEffect(() => {
+    setLabelDraft(neuron?.label ?? '');
+  }, [neuron?.id, neuron?.label]);
+
+  const commitLabel = useCallback(() => {
+    if (!neuron) return;
+    const next = labelDraft.trim();
+    if (next === neuron.label) return;
+    updateNeuron(neuron.id, { label: next });
+  }, [neuron, labelDraft, updateNeuron]);
 
   const changeModel = useCallback(
     (kind: string) => {
@@ -195,7 +219,34 @@ export function Inspector() {
           </TabPanel>
 
           <TabPanel value="params">
-            <PanelSection label="Model" flush>
+            <PanelSection label="Annotation" flush>
+              <Field
+                label="Label"
+                description="Names are how a cell stays findable once the network is large."
+              >
+                <input
+                  value={labelDraft}
+                  onChange={(e) => setLabelDraft(e.target.value)}
+                  onBlur={commitLabel}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.currentTarget.blur();
+                    } else if (e.key === 'Escape') {
+                      // Revert rather than commit, matching every other text field
+                      // in the app and the user's expectation of Escape.
+                      setLabelDraft(neuron.label);
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  placeholder={neuron.id.slice(0, 12)}
+                  className="w-full rounded-control border border-hairline bg-bg px-2 py-1 text-[12px] text-ink outline-none placeholder:text-ink-faint focus-visible:border-accent"
+                />
+              </Field>
+            </PanelSection>
+
+            <Separator />
+
+            <PanelSection label="Model">
               <Field label="Membrane model" description="Switching resets parameters to that model's defaults.">
                 <Select value={neuron.params.kind} onValueChange={changeModel}>
                   {NEURON_MODEL_KINDS.map((kind) => (
@@ -273,6 +324,56 @@ export function Inspector() {
                 }))}
                 circuit={circuit}
               />
+            </PanelSection>
+
+            <Separator />
+
+            <PanelSection label="Similar cells">
+              {similar.length === 0 ? (
+                <p className="text-[11px] text-ink-faint">
+                  This cell has no connections to compare.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-0.5">
+                  {similar.map((entry) => {
+                    const id = getEngine().idOf(entry.slot);
+                    const peer = id ? circuit.neurons.find((n) => n.id === id) : null;
+                    return (
+                      <li key={entry.slot}>
+                        <button
+                          type="button"
+                          onClick={() => (id ? select([id as NeuronId]) : undefined)}
+                          className="flex w-full items-center gap-1.5 rounded-control px-1.5 py-1 text-left transition-colors hover:bg-panel-raised"
+                        >
+                          <span
+                            aria-hidden
+                            className="size-2 shrink-0 rounded-[2px]"
+                            style={{
+                              backgroundColor: peer
+                                ? identityColorHex(peer.morphology.seed)
+                                : '#444',
+                            }}
+                          />
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                            {peer?.label || id?.slice(0, 10) || `slot ${entry.slot}`}
+                          </span>
+                          {/* The bar makes a run of near-identical scores legible
+                              in a way three decimal places never is. */}
+                          <span className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-panel">
+                            <span
+                              className="block h-full bg-accent"
+                              style={{ width: `${Math.max(2, entry.score * 100)}%` }}
+                            />
+                          </span>
+                          <span className="nf-numeric w-8 shrink-0 text-right text-[10px] text-ink-faint">
+                            {entry.score.toFixed(2)}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </PanelSection>
 
             <Separator />

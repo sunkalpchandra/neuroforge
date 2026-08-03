@@ -919,14 +919,27 @@ function ClustersSection({ prints, groups, onSelectCluster }: ClustersSectionPro
         runner = new FingerprintClustering(prints, k, {
           maxIterations: CLUSTER_MAX_ITERATIONS,
         });
+        // Seeding is `k` passes over every fingerprint and can consume the whole
+        // budget by itself. Starting an iteration on top of it is what turns one
+        // long frame into a visibly dropped one, so the first pass waits.
+        if (!runner.done && performance.now() >= deadline) {
+          frameRef.current = requestAnimationFrame(tick);
+          return;
+        }
       }
       const active: FingerprintClustering = runner;
       // At least one iteration per frame, so a network whose single pass is
-      // longer than the budget still makes progress instead of spinning.
-      let done: boolean;
-      do {
+      // longer than the budget still makes progress instead of spinning. Beyond
+      // the first, another only starts when the budget can pay for one the
+      // length of the last: checking the clock only afterwards is what lets a
+      // twelve-millisecond budget spend twenty-four.
+      let done = false;
+      while (!done) {
+        const started = performance.now();
         done = active.step();
-      } while (!done && performance.now() < deadline);
+        const finished = performance.now();
+        if (finished + (finished - started) > deadline) break;
+      }
 
       if (done) {
         setProgress(null);

@@ -3,6 +3,9 @@ import { ForceLayout } from '@neuroforge/physics';
 import type { FrameStats } from '@neuroforge/shared';
 import { EMPTY_FRAME_STATS, NEURON_FLAG } from '@neuroforge/shared';
 
+import { buildFingerprints, fingerprintSignature } from './similarity';
+import type { Fingerprints } from './similarity';
+
 /**
  * The long-lived, non-React runtime.
  *
@@ -145,6 +148,29 @@ export function boundsOf(ids: readonly string[]): FrameRequest | null {
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
 }
 
+/* ------------------------------------------------------------ fingerprints -- */
+
+let fingerprintCache: Fingerprints | null = null;
+
+/**
+ * Connectivity fingerprints for the live network, cached by signature.
+ *
+ * Building them is a full pass over the synapse list, and three panels want them
+ * — the inspector's similar-cells list, the cell-type clustering, and the query
+ * language's similarity operators. Sharing one cache keyed on the signature the
+ * module already computes means the pass happens once per topology rather than
+ * once per consumer.
+ */
+export function getFingerprints(populationCount: number): Fingerprints {
+  const buffers = getEngine().buffers;
+  const signature = fingerprintSignature(buffers, populationCount);
+  if (fingerprintCache !== null && fingerprintCache.signature === signature) {
+    return fingerprintCache;
+  }
+  fingerprintCache = buildFingerprints(buffers, populationCount);
+  return fingerprintCache;
+}
+
 /* ------------------------------------------------------- camera telemetry -- */
 
 export interface CameraTelemetry {
@@ -265,6 +291,7 @@ export function getStatsServerSnapshot(): FrameStats {
 export function disposeRuntime(): void {
   engine?.dispose();
   engine = null;
+  fingerprintCache = null;
   probes?.reset();
   probes = null;
   layout = null;

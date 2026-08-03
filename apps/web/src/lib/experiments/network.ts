@@ -489,7 +489,6 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
 
   const nyquistHz = sampleRateHz / 2;
   const searchMaxHz = Math.min(SPECTRUM_MAX_HZ, nyquistHz);
-  const dominantHz = dominantFrequency(power, binHz, SPECTRUM_MIN_HZ, searchMaxHz);
 
   const first = Math.max(1, Math.ceil(SPECTRUM_MIN_HZ / binHz));
   const last = Math.min(power.length - 1, Math.floor(searchMaxHz / binHz));
@@ -507,6 +506,12 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
     power: accumulated[index],
     share: totalPower > 0 ? accumulated[index] / totalPower : 0,
   }));
+
+  // A silent network has no peak. Searching an all-zero spectrum would return
+  // the first bin and the panel would print a dominant frequency for a circuit
+  // that never fired.
+  const dominantHz =
+    totalPower > 0 ? dominantFrequency(power, binHz, SPECTRUM_MIN_HZ, searchMaxHz) : 0;
 
   const peakBin = Math.min(power.length - 1, Math.max(0, Math.round(dominantHz / binHz)));
   const band = dominantHz > 0 ? bandFor(dominantHz) : null;

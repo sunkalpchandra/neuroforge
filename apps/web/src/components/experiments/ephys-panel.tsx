@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Copy, FlaskConical, Play, Square, TriangleAlert, X } from 'lucide-react';
 import {
   Badge,
@@ -22,7 +23,7 @@ import {
   pushToast,
 } from '@neuroforge/ui';
 import { useEditor } from '@neuroforge/editor';
-import { RECEPTOR_LABELS, identityColorHex } from '@neuroforge/shared';
+import { NEURON_MODEL_LABELS, RECEPTOR_LABELS, identityColorHex } from '@neuroforge/shared';
 import type { Neuron, Synapse } from '@neuroforge/shared';
 
 import { fixed, grouped } from '@/lib/format';
@@ -32,6 +33,7 @@ import {
   MAX_LEVELS,
   MIN_DT,
   ProtocolAbort,
+  rheobaseProbeEstimate,
   runAdaptation,
   runFiCurve,
   runIvCurve,
@@ -101,7 +103,6 @@ interface PlotSeries {
   dashed?: boolean;
   width?: number;
   opacity?: number;
-  dotRadius?: number;
 }
 
 interface PlotMarker {
@@ -118,8 +119,7 @@ interface PlotProps {
   yLabel: string;
   ariaLabel: string;
   height?: number;
-  /** Force these values into the domain, e.g. the origin of an F-I curve. */
-  includeX?: readonly number[];
+  /** Force these values into the vertical domain, e.g. the origin of a rate axis. */
   includeY?: readonly number[];
 }
 
@@ -165,7 +165,6 @@ function Plot({
   yLabel,
   ariaLabel,
   height = 148,
-  includeX = [],
   includeY = [],
 }: PlotProps) {
   const domain = useMemo(() => {
@@ -188,7 +187,6 @@ function Plot({
       if (marker.axis === 'x') visit(marker.value, Number.NaN);
       else visit(Number.NaN, marker.value);
     }
-    for (const value of includeX) visit(value, Number.NaN);
     for (const value of includeY) visit(Number.NaN, value);
 
     if (!Number.isFinite(x0)) {
@@ -211,7 +209,7 @@ function Plot({
     }
     const padY = (y1 - y0) * 0.08;
     return { x0, x1, y0: y0 - padY, y1: y1 + padY };
-  }, [series, markers, includeX, includeY]);
+  }, [series, markers, includeY]);
 
   const plotW = PLOT_W - PAD_LEFT - PAD_RIGHT;
   const plotH = height - PAD_TOP - PAD_BOTTOM;
@@ -313,7 +311,7 @@ function Plot({
                   key={`${entry.id}-${index}`}
                   cx={sx(point.x)}
                   cy={sy(point.y)}
-                  r={entry.dotRadius ?? 2.1}
+                  r={2.1}
                   fill={point.open === true ? FIELD : entry.color}
                   stroke={entry.color}
                   strokeWidth={0.9}
@@ -399,6 +397,11 @@ function SpikeStrip({ times, durationMs, color }: {
   const width = PLOT_W;
   const height = 16;
   const span = durationMs > 0 ? durationMs : 1;
+  // The strip is ~280 units wide, so past a few hundred ticks every extra
+  // element lands on a column already drawn. A uniform stride keeps relative
+  // density intact while bounding the DOM a fast cell over a long step produces.
+  const stride = Math.max(1, Math.ceil(times.length / 600));
+  const drawn = stride === 1 ? times : times.filter((_, index) => index % stride === 0);
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
@@ -409,7 +412,7 @@ function SpikeStrip({ times, durationMs, color }: {
       className="block"
     >
       <rect x={PAD_LEFT} y={2} width={width - PAD_LEFT - PAD_RIGHT} height={height - 4} fill={FIELD} />
-      {times.map((time, index) => (
+      {drawn.map((time, index) => (
         <line
           key={index}
           x1={PAD_LEFT + (time / span) * (width - PAD_LEFT - PAD_RIGHT)}
@@ -457,11 +460,11 @@ function Stat({
   );
 }
 
-function StatGrid({ children }: { children: React.ReactNode }) {
+function StatGrid({ children }: { children: ReactNode }) {
   return <div className="grid grid-cols-2 gap-x-3 gap-y-2">{children}</div>;
 }
 
-function Note({ children, tone = 'faint' }: { children: React.ReactNode; tone?: 'faint' | 'warning' }) {
+function Note({ children, tone = 'faint' }: { children: ReactNode; tone?: 'faint' | 'warning' }) {
   return (
     <p
       className={cn(
@@ -706,7 +709,7 @@ function TauView({ result, color }: { result: TauResult; color: string }) {
           value={result.analyticTauMs === null ? 'n/a' : `${fixed(result.analyticTauMs, 3)} ms`}
           hint={
             result.analyticTauMs === null
-              ? `The ${result.meta.model} model does not state a passive cm and gL, so there is nothing to compare against.`
+              ? `The ${NEURON_MODEL_LABELS[result.meta.model]} model does not state a passive cm and gL, so there is nothing to compare against.`
               : 'Passive time constant implied by the cell parameters.'
           }
         />
@@ -718,7 +721,7 @@ function TauView({ result, color }: { result: TauResult; color: string }) {
               ? 'text-warning'
               : 'text-success'
           }
-          hint="Signed difference between the measured and analytic time constants. Residual error is the integration step and, for AdEx, the exponential term active at rest."
+          hint="Signed difference between the measured and analytic time constants. A few percent is expected wherever a second process shares the membrane — AdEx's subthreshold adaptation conductance makes the true response a sum of two exponentials, not one."
         />
         <Stat
           label="Deflection"
@@ -1143,36 +1146,28 @@ export function EphysPanel({ open = true, onClose, className }: EphysPanelProps)
             2
         );
       case 'rheobase':
-        return (
-          2 +
-          Math.max(
-            1,
-            Math.ceil(
-              Math.log2(
-                Math.max(1, Math.abs(rheo.highPa - rheo.lowPa) / Math.max(1e-4, rheo.tolerancePa)),
-              ),
-            ),
-          )
-        );
+        return rheobaseProbeEstimate(rheo.lowPa, rheo.highPa, rheo.tolerancePa);
       default:
         return 1;
     }
   }, [protocol, fi, iv, ppr, rheo]);
 
-  const blocked =
-    neuron === null
-      ? 'Select a neuron to record from.'
-      : // A disabled cell is skipped by the integrator entirely, so every
-        // protocol would report a flat line rather than a measurement.
-        !neuron.enabled
-        ? 'This cell is disabled and excluded from integration. Enable it in the inspector to record from it.'
-        : protocol === 'ppr' && !usable.some((synapse) => synapse.id === synapseId)
-        ? outgoing.length === 0
-          ? 'This cell has no outgoing synapses to stimulate through.'
-          : usable.length === 0
-            ? 'Every outgoing synapse is disabled or a gap junction.'
-            : 'Choose a synapse to stimulate through.'
-        : null;
+  /** Why Run is unavailable, or null when the protocol is ready to go. */
+  const blocked = ((): string | null => {
+    if (neuron === null) return 'Select a neuron to record from.';
+    // A disabled cell is skipped by the integrator entirely, so every protocol
+    // would report a flat line rather than a measurement.
+    if (!neuron.enabled) {
+      return 'This cell is disabled and excluded from integration. Enable it in the inspector to record from it.';
+    }
+    if (protocol !== 'ppr') return null;
+    if (outgoing.length === 0) return 'This cell has no outgoing synapses to stimulate through.';
+    if (usable.length === 0) return 'Every outgoing synapse is disabled or a gap junction.';
+    if (!usable.some((synapse) => synapse.id === synapseId)) {
+      return 'Choose a synapse to stimulate through.';
+    }
+    return null;
+  })();
 
   const run = useCallback(async () => {
     if (neuron === null) return;
@@ -1269,13 +1264,15 @@ export function EphysPanel({ open = true, onClose, className }: EphysPanelProps)
       subtitle={
         neuron === null
           ? 'No cell selected'
-          : `${neuron.label.length > 0 ? neuron.label : neuron.id.slice(0, 8)} · ${neuron.params.kind}`
+          : `${neuron.label.length > 0 ? neuron.label : neuron.id.slice(0, 8)} · ${
+              NEURON_MODEL_LABELS[neuron.params.kind]
+            }`
       }
       icon={<FlaskConical />}
       actions={
         <>
           {result !== null ? (
-            <Tooltip content="Time the whole protocol took, and the simulated time it integrated">
+            <Tooltip content="Wall-clock time the whole protocol took">
               <Badge variant="outline" size="sm" numeric tabIndex={0}>
                 {fixed(result.meta.elapsedMs, 0)} ms
               </Badge>
