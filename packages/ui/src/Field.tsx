@@ -6,6 +6,7 @@ import { cn } from './cn';
 
 interface FieldContextValue {
   controlId: string;
+  labelId: string | undefined;
   descriptionId: string | undefined;
   invalid: boolean;
   disabled: boolean;
@@ -13,21 +14,30 @@ interface FieldContextValue {
 
 const FieldContext = React.createContext<FieldContextValue | null>(null);
 
+export interface FieldControl {
+  id: string;
+  /**
+   * Set this on controls that are not labelable elements — a Radix slider root
+   * is a `<span>`, a segmented control a `<div>` — where the label's `htmlFor`
+   * has nothing to bind to.
+   */
+  labelledBy: string | undefined;
+  describedBy: string | undefined;
+  invalid: boolean;
+  disabled: boolean;
+}
+
 /**
  * Lets a control adopt the id, description and disabled state of the Field that
  * wraps it, so `<Field label="Threshold"><NumberField …/></Field>` is correctly
  * associated without the caller wiring ids by hand.
  */
-export function useFieldControl(explicitId?: string): {
-  id: string;
-  describedBy: string | undefined;
-  invalid: boolean;
-  disabled: boolean;
-} {
+export function useFieldControl(explicitId?: string): FieldControl {
   const field = React.useContext(FieldContext);
   const fallbackId = React.useId();
   return {
     id: explicitId ?? field?.controlId ?? fallbackId,
+    labelledBy: field?.labelId,
     describedBy: field?.descriptionId,
     invalid: field?.invalid ?? false,
     disabled: field?.disabled ?? false,
@@ -100,16 +110,19 @@ export const Field = React.forwardRef<HTMLDivElement, FieldProps>(function Field
   const generatedId = React.useId();
   const controlId = htmlFor ?? generatedId;
   const descriptionId = `${controlId}-description`;
+  const labelId = `${controlId}-label`;
   const hasHint = error !== undefined || description !== undefined;
+  const hasLabel = label !== undefined;
 
   const context = React.useMemo<FieldContextValue>(
     () => ({
       controlId,
+      labelId: hasLabel ? labelId : undefined,
       descriptionId: hasHint ? descriptionId : undefined,
       invalid: error !== undefined,
       disabled,
     }),
-    [controlId, descriptionId, hasHint, error, disabled],
+    [controlId, descriptionId, hasHint, hasLabel, labelId, error, disabled],
   );
 
   return (
@@ -132,8 +145,8 @@ export const Field = React.forwardRef<HTMLDivElement, FieldProps>(function Field
               orientation === 'row' ? 'w-[38%] shrink-0' : 'w-full',
             )}
           >
-            {label !== undefined && (
-              <Label htmlFor={controlId} required={required} className="truncate">
+            {hasLabel && (
+              <Label id={labelId} htmlFor={controlId} required={required} className="truncate">
                 {label}
               </Label>
             )}

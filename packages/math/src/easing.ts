@@ -69,8 +69,34 @@ const MAX_SUBSTEPS = 64;
 const SETTLE_DISPLACEMENT = 1e-4;
 const SETTLE_VELOCITY = 1e-3;
 
-function substepCount(dt: number): number {
-  const wanted = Math.ceil(dt / MAX_SUBSTEP);
+/**
+ * Largest substep this parameterisation stays stable at. Symplectic Euler needs
+ * h < 2/omega for the stiffness term and h < 2m/c for the damping term; a
+ * quarter of each limit leaves room for the two acting together.
+ */
+function stableStep(stiffness: number, damping: number, mass: number): number {
+  const m = mass > 0 ? mass : 1;
+  let h = MAX_SUBSTEP;
+  const omega = Math.sqrt(Math.max(0, stiffness) / m);
+  if (omega > 0) h = Math.min(h, 0.5 / omega);
+  if (damping > 0) h = Math.min(h, (0.5 * m) / damping);
+  return h;
+}
+
+/**
+ * Splits `dt` into substeps no longer than `maxStep`, capped at MAX_SUBSTEPS.
+ * Beyond that cap the spring advances by `MAX_SUBSTEPS * maxStep` instead of the
+ * whole delta: falling behind after a stalled frame is recoverable, exploding is
+ * not.
+ */
+function substepSize(dt: number, maxStep: number): number {
+  const wanted = Math.ceil(dt / maxStep);
+  if (wanted <= MAX_SUBSTEPS) return dt / (wanted < 1 ? 1 : wanted);
+  return maxStep;
+}
+
+function substepCount(dt: number, maxStep: number): number {
+  const wanted = Math.ceil(dt / maxStep);
   return wanted < 1 ? 1 : wanted > MAX_SUBSTEPS ? MAX_SUBSTEPS : wanted;
 }
 
@@ -115,6 +141,7 @@ export class SpringScalar {
   #stiffness: number;
   #damping: number;
   #invMass: number;
+  #maxStep: number;
 
   constructor(
     value: number,
@@ -126,6 +153,7 @@ export class SpringScalar {
     this.#stiffness = stiffness;
     this.#damping = damping;
     this.#invMass = mass > 0 ? 1 / mass : 1;
+    this.#maxStep = stableStep(stiffness, damping, mass);
   }
 
   set target(v: number) {
@@ -147,8 +175,8 @@ export class SpringScalar {
 
   step(dt: number): number {
     if (!(dt > 0)) return this.#axis.value;
-    const steps = substepCount(dt);
-    const h = dt / steps;
+    const steps = substepCount(dt, this.#maxStep);
+    const h = substepSize(dt, this.#maxStep);
     for (let i = 0; i < steps; i += 1) {
       this.#axis.advance(this.#stiffness, this.#damping, this.#invMass, h);
     }
@@ -167,6 +195,7 @@ export class SpringVec3 {
   #stiffness: number;
   #damping: number;
   #invMass: number;
+  #maxStep: number;
 
   constructor(
     x: number,
@@ -182,6 +211,7 @@ export class SpringVec3 {
     this.#stiffness = stiffness;
     this.#damping = damping;
     this.#invMass = mass > 0 ? 1 / mass : 1;
+    this.#maxStep = stableStep(stiffness, damping, mass);
   }
 
   setTarget(x: number, y: number, z: number): void {
@@ -198,8 +228,8 @@ export class SpringVec3 {
 
   step(dt: number): void {
     if (!(dt > 0)) return;
-    const steps = substepCount(dt);
-    const h = dt / steps;
+    const steps = substepCount(dt, this.#maxStep);
+    const h = substepSize(dt, this.#maxStep);
     const k = this.#stiffness;
     const c = this.#damping;
     const m = this.#invMass;

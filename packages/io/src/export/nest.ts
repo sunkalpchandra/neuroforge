@@ -356,7 +356,10 @@ function stimulusDevices(model: ExportCircuit, nestIndex: readonly number[]): st
         connectSpec = `, syn_spec={'weight': ${pyFloat(p.amplitude)}, 'delay': ${pyFloat(model.dt)}}`;
         break;
       case 'ramp': {
-        const steps = Math.max(2, Math.min(2000, Math.ceil(p.duration / Math.max(model.dt, 1e-6)) + 1));
+        // step_current_generator holds each value until the next time point, so
+        // the ramp is sampled on a 1 ms grid: finer than that only bloats the
+        // script without changing the current a neuron sees.
+        const steps = Math.max(2, Math.min(512, Math.ceil(p.duration / Math.max(model.dt, 1)) + 1));
         const times: number[] = [];
         const values: number[] = [];
         for (let i = 0; i < steps; i += 1) {
@@ -475,7 +478,7 @@ export function exportNest(circuit: Circuit): string {
           'To simulate them either',
           '  1. describe the model in NESTML, build it into a module and load it here:',
           "         nest.Install('mymodule')",
-          "         ml = nest.Create('morris_lecar', %d)".replace('%d', String(plan.group.size)),
+          `         ${plan.group.name} = nest.Create('morris_lecar', ${plan.group.size})`,
           '  2. or run this population from the Brian2 export, which implements it directly.',
           'Connections that touch these neurons are listed in the banner above and are not created below.',
         ]),

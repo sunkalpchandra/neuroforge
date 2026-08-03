@@ -40,6 +40,16 @@ export function roundTo(value: number, decimals: number): number {
   return Number(value.toFixed(clamp(Math.trunc(decimals), 0, 100)));
 }
 
+/**
+ * Equality within a relative epsilon. Exists so display code can ignore binary
+ * floating-point dust — `0.1 + 0.2` must still read as `0.3`, not `0.300`.
+ */
+export function nearlyEqual(a: number, b: number, epsilon = 1e-9): boolean {
+  if (a === b) return true;
+  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
+  return Math.abs(a - b) <= scale * epsilon;
+}
+
 /** Round to a number of significant digits; used where values span decades. */
 export function roundSignificant(value: number, digits: number): number {
   if (value === 0 || !Number.isFinite(value)) return value;
@@ -80,11 +90,6 @@ export function toNormalized(value: number, min: number, max: number): number {
   return clamp((value - min) / (max - min), 0, 1);
 }
 
-function trimTrailingZeros(text: string): string {
-  if (!text.includes('.')) return text;
-  return text.replace(/\.?0+$/, '');
-}
-
 /** Fixed-decimal formatting; `-0` is normalised so readouts never flicker sign. */
 export function formatFixed(value: number, decimals: number): string {
   if (!Number.isFinite(value)) return value > 0 ? '∞' : value < 0 ? '-∞' : 'NaN';
@@ -105,7 +110,13 @@ export function formatAdaptive(value: number, significant = 4): string {
   if (magnitude >= 1e6 || magnitude < 1e-4) {
     return value.toExponential(digits - 1).replace(/\.?0+e/, 'e');
   }
-  return trimTrailingZeros(value.toPrecision(digits));
+  // `toPrecision` switches to exponential on its own as soon as the exponent
+  // reaches `digits` — `(12345).toPrecision(4)` is `"1.235e+4"` — which is the
+  // very thing this branch exists to avoid. Rounding through `Number` keeps the
+  // significant-digit rounding but restores positional notation, and `String`
+  // only reaches for an exponent below 1e-6 or above 1e21, neither of which can
+  // occur inside this band.
+  return String(roundSignificant(value, digits));
 }
 
 /**

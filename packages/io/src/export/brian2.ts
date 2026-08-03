@@ -804,9 +804,9 @@ export function exportBrian2(circuit: Circuit): string {
   out.push("run(DURATION, report='text')");
   out.push('');
   out.push('# ' + '='.repeat(70));
-  out.push('# Summary')
+  out.push('# Summary');
   out.push('# ' + '='.repeat(70));
-  out.push(`for _name, _group, _monitor in [`);
+  out.push('for _name, _group, _monitor in [');
   for (const name of monitorNames) out.push(`    (${pyStr(name)}, ${name}, spikes_${name}),`);
   out.push(']:');
   out.push('    _rate = _monitor.num_spikes / (len(_group) * float(DURATION/second))');

@@ -25,7 +25,7 @@ import type {
 } from '@neuroforge/shared';
 
 /** Simulated duration written into every generated script. */
-export const DEFAULT_RUN_MS = 1000;
+const DEFAULT_RUN_MS = 1000;
 
 /**
  * Upper bound on the number of distinct synaptic conductance channels an
@@ -33,7 +33,7 @@ export const DEFAULT_RUN_MS = 1000;
  * per synapse, so a circuit that jitters them would otherwise produce one
  * channel per synapse.
  */
-export const MAX_CHANNELS = 12;
+const MAX_CHANNELS = 12;
 
 /** Reversal potentials at or above this are treated as excitatory (mV). */
 const EXCITATORY_REVERSAL_SPLIT = -50;
@@ -59,11 +59,6 @@ export function finite(value: number, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-/** Membrane model of a neuron. */
-export function modelOf(neuron: Neuron): NeuronModelKind {
-  return neuron.params.kind;
-}
-
 export function modelLabel(kind: NeuronModelKind): string {
   return MODEL_DESCRIPTIONS[kind];
 }
@@ -86,7 +81,7 @@ export interface ConductanceKernel {
   area: number;
 }
 
-export function conductanceKernel(tauRiseMs: number, tauDecayMs: number): ConductanceKernel {
+function conductanceKernel(tauRiseMs: number, tauDecayMs: number): ConductanceKernel {
   const a = Math.max(finite(tauRiseMs, 0), 0);
   const b = Math.max(finite(tauDecayMs, 1), 1e-4);
   const tauDecay = Math.max(a, b);
@@ -497,13 +492,8 @@ export function lifEquivalent(params: NeuronParams): LifEquivalent {
   }
 }
 
-/** Driving force in mV used to turn a conductance into an equivalent current. */
-export function drivingForce(eRev: number, vRest: number): number {
-  return finite(eRev, 0) - finite(vRest, -65);
-}
-
 /** (exp(x) - 1) / x, evaluated stably at its removable singularity. */
-export function exprel(x: number): number {
+function exprel(x: number): number {
   return Math.abs(x) < 1e-8 ? 1 + x / 2 : Math.expm1(x) / x;
 }
 
@@ -648,10 +638,6 @@ export function pyStr(value: string): string {
   return `'${escaped}'`;
 }
 
-export function pyBool(value: boolean): string {
-  return value ? 'True' : 'False';
-}
-
 function wrapItems(items: readonly string[], perLine: number, indentWidth: number): string {
   if (items.length === 0) return '[]';
   if (items.length <= perLine) return `[${items.join(', ')}]`;
@@ -669,10 +655,6 @@ export function pyFloatList(values: readonly number[], perLine = 8, indentWidth 
 
 export function pyIntList(values: readonly number[], perLine = 16, indentWidth = 4): string {
   return wrapItems(values.map(pyInt), perLine, indentWidth);
-}
-
-export function pyStrList(values: readonly string[], perLine = 6, indentWidth = 4): string {
-  return wrapItems(values.map(pyStr), perLine, indentWidth);
 }
 
 /** Indent every line of a block by `spaces`, leaving blank lines empty. */
@@ -702,18 +684,6 @@ export function slugify(name: string, fallback = 'circuit'): string {
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
   return slug.length > 0 ? slug.slice(0, 64) : fallback;
-}
-
-/** Python identifier derived from a document name. */
-export function identifierize(name: string, fallback = 'circuit'): string {
-  const id = name
-    .normalize('NFKD')
-    .replace(/[^\w\s]/g, '')
-    .trim()
-    .replace(/[\s-]+/g, '_')
-    .toLowerCase();
-  if (id.length === 0) return fallback;
-  return /^[0-9]/.test(id) ? `_${id}` : id;
 }
 
 /**

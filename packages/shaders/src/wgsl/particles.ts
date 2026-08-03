@@ -5,7 +5,6 @@ import {
   WGSL_PRELUDE,
   WGSL_SPLINE,
   WGSL_SYNAPSE_STRUCTS,
-  WGSL_WORKGROUP_SIZE,
 } from './common';
 
 /**
@@ -67,7 +66,7 @@ const PARTICLE_COMMON = [
 export const PARTICLE_UPDATE_WGSL = /* wgsl */ `
 ${PARTICLE_COMMON}
 
-@compute @workgroup_size(${WGSL_WORKGROUP_SIZE})
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let index = gid.x;
   if (index >= uni.capacity) {
@@ -106,7 +105,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   particle.position = next;
 
   particles[index] = particle;
-  atomicAdd(&counter.live, 1u);
+  _ = atomicAdd(&counter.live, 1u);
 }
 `;
 
@@ -128,7 +127,7 @@ ${PARTICLE_COMMON}
 
 const MAX_EMIT_PER_SPIKE : u32 = 4u;
 
-@compute @workgroup_size(${WGSL_WORKGROUP_SIZE})
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let index = gid.x;
   if (index >= uni.synapseCount || uni.capacity == 0u) {

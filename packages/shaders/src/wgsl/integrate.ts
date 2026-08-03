@@ -1,9 +1,5 @@
 import type { ShaderBinding } from '../types';
-import {
-  WGSL_NEURON_STRUCTS,
-  WGSL_PRELUDE,
-  WGSL_WORKGROUP_SIZE,
-} from './common';
+import { WGSL_NEURON_STRUCTS, WGSL_PRELUDE } from './common';
 
 /**
  * Packed neuron parameter slots.
@@ -168,6 +164,13 @@ struct IntegrateUniforms {
 // detected on exactly the step it would have been without the clamp.
 const ADEX_EXP_ARG_MAX : f32 = 20.0;
 
+// Hodgkin-Huxley and Morris-Lecar have no reset, so a spike is an upward
+// crossing of vDetect. A single action potential can wobble across that level
+// more than once while the noise term is active, which would log one spike as
+// several; two crossings closer together than this are the same event. Matches
+// EDGE_REFRACTORY in the reference CPU integrator.
+const EDGE_REFRACTORY : f32 = 1.0;
+
 /** Push a spike into the ring the particle system and the probes read. */
 fn logSpike(neuron : u32) {
   let ticket = atomicAdd(&spikeLog[0], 1u);
@@ -176,7 +179,7 @@ fn logSpike(neuron : u32) {
   }
 }
 
-@compute @workgroup_size(${WGSL_WORKGROUP_SIZE})
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let index = gid.x;
   if (index >= uni.count) {
@@ -187,28 +190,35 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let mode = uni.integrator;
   let info = statics[index];
   var state = dynamics[index];
-  var out = outputs[index];
+  var outState = outputs[index];
 
   // Synaptic current is delivered in fixed point by the propagate pass. Reading
   // it clears the accumulator for the next step.
   let iSynPa = f32(iSyn[index]) * INV_CURRENT_SCALE;
   iSyn[index] = 0;
-  out.spike = 0u;
+  outState.spike = 0u;
 
   let flashDecay = exp(-dt / max(uni.flashTau, MIN_TAU));
   let rateDecay = exp(-dt / max(uni.rateTau, MIN_TAU));
 
   if (!metaEnabled(info.meta)) {
-    out.flash = out.flash * flashDecay;
-    out.rate = out.rate * rateDecay;
-    outputs[index] = out;
+    outState.flash = outState.flash * flashDecay;
+    outState.rate = outState.rate * rateDecay;
+    outputs[index] = outState;
     return;
   }
 
   var noiseCurrent = 0.0;
   let noiseAmplitude = info.noise + uni.noiseScale;
   if (noiseAmplitude > 0.0) {
-    noiseCurrent = noiseAmplitude * randomNormal(hashCombine(index ^ uni.seed, uni.step));
+    // White noise is scaled by 1/sqrt(dt) so the variance a membrane accumulates
+    // over a millisecond is independent of the timestep. Without it, halving dt
+    // quietly halves the effective noise, and the GPU backend would disagree
+    // with the CPU reference by sqrt(1/dt) - a factor of 3.2 at the default
+    // dt = 0.1 ms.
+    let whiteNoiseScale = inverseSqrt(max(dt, MIN_TAU));
+    noiseCurrent =
+      noiseAmplitude * whiteNoiseScale * randomNormal(hashCombine(index ^ uni.seed, uni.step));
   }
   let current = iSynPa + info.iExt + info.bias + noiseCurrent;
 
@@ -293,7 +303,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       let vInf = (gNaOpen * eNa + gKOpen * eK + gL * eL + current) / gTotal;
       state.v = integrateLinear(v, vInf, dt, cm / gTotal, mode);
 
-      spiked = vPrev < vDetect && state.v >= vDetect;
+      spiked = vPrev < vDetect
+        && state.v >= vDetect
+        && uni.time - state.lastSpike > EDGE_REFRACTORY;
     }
 
     // cm dv/dt = -gL (v - eL) + gL dT exp((v - vT)/dT) - w + I,
@@ -364,7 +376,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       let vInf = (gCaOpen * eCa + gKOpen * eK + gL * eL + current) / gTotal;
       state.v = integrateLinear(v, vInf, dt, cm / gTotal, mode);
 
-      spiked = vPrev < vDetect && state.v >= vDetect;
+      spiked = vPrev < vDetect
+        && state.v >= vDetect
+        && uni.time - state.lastSpike > EDGE_REFRACTORY;
     }
 
     default: {
@@ -373,23 +387,23 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   state.v = clamp(state.v, -V_LIMIT, V_LIMIT);
   state.calcium = state.calcium * exp(-dt / max(uni.calciumTau, MIN_TAU));
-  out.flash = out.flash * flashDecay;
-  out.rate = out.rate * rateDecay;
+  outState.flash = outState.flash * flashDecay;
+  outState.rate = outState.rate * rateDecay;
 
   if (spiked) {
-    out.spike = 1u;
-    out.spikeCount = out.spikeCount + 1u;
-    out.flash = 1.0;
+    outState.spike = 1u;
+    outState.spikeCount = outState.spikeCount + 1u;
+    outState.flash = 1.0;
     // An exponential spike kernel of unit area integrates to one event, so an
     // increment of 1/tau expressed per second reads directly as a rate in Hz.
-    out.rate = out.rate + 1000.0 / max(uni.rateTau, MIN_TAU);
+    outState.rate = outState.rate + 1000.0 / max(uni.rateTau, MIN_TAU);
     state.lastSpike = uni.time;
     state.calcium = state.calcium + uni.calciumGain;
     logSpike(index);
   }
 
   dynamics[index] = state;
-  outputs[index] = out;
+  outputs[index] = outState;
 }
 `;
 

@@ -12,6 +12,7 @@ import {
   formatFixed,
   fromLogNormalized,
   isLogRange,
+  nearlyEqual,
   parseNumber,
   roundSignificant,
   roundTo,
@@ -150,9 +151,11 @@ export const NumberField = React.forwardRef<HTMLInputElement, NumberFieldProps>(
     const display = React.useMemo(() => {
       if (precision !== undefined) return formatFixed(value, precision);
       if (logarithmic) return formatAdaptive(value, 4);
+      // Normally shows the step's decimals; reveals more only when a fine drag
+      // or a typed value genuinely sits off the step grid.
       const base = decimalsForStep(gridStep);
       for (let decimals = base; decimals < base + EXTRA_DECIMALS; decimals += 1) {
-        if (roundTo(value, decimals) === value) return formatFixed(value, decimals);
+        if (nearlyEqual(roundTo(value, decimals), value)) return formatFixed(value, decimals);
       }
       return formatFixed(value, base + EXTRA_DECIMALS);
     }, [gridStep, logarithmic, precision, value]);

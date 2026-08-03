@@ -14,6 +14,16 @@
  * The `*_BINDINGS` tables describe group 0 of each compute pipeline, and the
  * `*_UNIFORMS` tables name and type every uniform of each GLSL program, so both
  * sides can be wired from data rather than from reading shader source.
+ *
+ * Every compute kernel declares one entry point named `main` with a workgroup
+ * size of `WGSL_WORKGROUP_SIZE`, and they are ordered within a step:
+ *
+ *   1. the delay stage fills the per-synapse `arrival` buffer
+ *   2. SYNAPSE_PROPAGATE_WGSL, one invocation per synapse
+ *   3. NEURON_INTEGRATE_WGSL, one invocation per neuron; this consumes and
+ *      clears the accumulated synaptic current and publishes the spike flags
+ *   4. SYNAPSE_STDP_WGSL, when plasticity is enabled
+ *   5. PARTICLE_EMIT_WGSL then PARTICLE_UPDATE_WGSL, once per rendered frame
  */
 
 export type { BindingType, ShaderBinding, UniformTable, UniformType } from './types';

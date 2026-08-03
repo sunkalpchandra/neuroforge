@@ -119,10 +119,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function describe(value: unknown): string {
   if (value === null) return 'null';
+  if (value === undefined) return 'nothing';
   if (Array.isArray(value)) return 'an array';
   const type = typeof value;
   if (type === 'string') return `the string ${JSON.stringify(value)}`;
-  if (type === 'number' || type === 'boolean') return `${String(value)}`;
+  if (type === 'number' || type === 'boolean') return String(value);
   return `a ${type}`;
 }
 
@@ -247,19 +248,30 @@ function vec3(report: Report, value: unknown, path: string, fallback: Vec3): Vec
   };
 }
 
-/** Returns the array, or null after reporting. `required` distinguishes absent from malformed. */
-function arrayOf(report: Report, value: unknown, path: string, required: boolean): unknown[] | null {
+/**
+ * Returns the array, or null after reporting. `required` distinguishes absent
+ * from malformed; `fatal` marks the collections a document cannot be rebuilt
+ * without, where the wrong type has to abort the load rather than be repaired.
+ */
+function arrayOf(
+  report: Report,
+  value: unknown,
+  path: string,
+  required: boolean,
+  fatal: boolean,
+): unknown[] | null {
   if (Array.isArray(value)) return value;
   if (value === undefined || value === null) {
     if (required) report.repair(path, 'missing; using an empty list');
     return null;
   }
-  report.reject(path, `expected an array, got ${describe(value)}`);
+  if (fatal) report.reject(path, `expected an array, got ${describe(value)}`);
+  else report.repair(path, `expected an array, got ${describe(value)}; using an empty list`);
   return null;
 }
 
 function stringList(report: Report, value: unknown, path: string): string[] {
-  const raw = arrayOf(report, value, path, false);
+  const raw = arrayOf(report, value, path, false, false);
   if (!raw) return [];
   const out: string[] = [];
   raw.forEach((item, i) => {
@@ -598,7 +610,7 @@ function readLayout(report: Report, value: unknown, path: string): PopulationLay
         seed: num(report, value.seed, `${path}.seed`, 1, { integer: true }),
       };
     case 'explicit': {
-      const raw = arrayOf(report, value.positions, `${path}.positions`, true);
+      const raw = arrayOf(report, value.positions, `${path}.positions`, true, false);
       const positions: Vec3[] = [];
       if (raw) {
         raw.forEach((item, i) => {
@@ -981,7 +993,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     return { circuit: null, errors: report.messages };
   }
 
-  const rawNeurons = arrayOf(report, source.neurons, 'neurons', true);
+  const rawNeurons = arrayOf(report, source.neurons, 'neurons', true, true);
   if (report.fatal) return { circuit: null, errors: report.messages };
 
   const neurons: Neuron[] = [];
@@ -999,7 +1011,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     });
   }
 
-  const rawSynapses = arrayOf(report, source.synapses, 'synapses', true);
+  const rawSynapses = arrayOf(report, source.synapses, 'synapses', true, true);
   const synapses: Synapse[] = [];
   const seenSynapses = new Set<string>();
   if (rawSynapses) {
@@ -1022,7 +1034,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     });
   }
 
-  const rawPopulations = arrayOf(report, source.populations, 'populations', false);
+  const rawPopulations = arrayOf(report, source.populations, 'populations', false, false);
   const populations: Population[] = [];
   const seenPopulations = new Set<string>();
   if (rawPopulations) {
@@ -1050,7 +1062,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     }
   }
 
-  const rawProjections = arrayOf(report, source.projections, 'projections', false);
+  const rawProjections = arrayOf(report, source.projections, 'projections', false, false);
   const projections: Projection[] = [];
   if (rawProjections) {
     rawProjections.forEach((item, i) => {
@@ -1059,7 +1071,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     });
   }
 
-  const rawStimuli = arrayOf(report, source.stimuli, 'stimuli', false);
+  const rawStimuli = arrayOf(report, source.stimuli, 'stimuli', false, false);
   const stimuli: Stimulus[] = [];
   if (rawStimuli) {
     rawStimuli.forEach((item, i) => {
@@ -1068,7 +1080,7 @@ export function migrateCircuit(raw: unknown): { circuit: Circuit | null; errors:
     });
   }
 
-  const rawProbes = arrayOf(report, source.probes, 'probes', false);
+  const rawProbes = arrayOf(report, source.probes, 'probes', false, false);
   const probes: Probe[] = [];
   if (rawProbes) {
     rawProbes.forEach((item, i) => {

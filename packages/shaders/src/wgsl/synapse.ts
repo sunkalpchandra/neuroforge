@@ -3,7 +3,6 @@ import {
   WGSL_NEURON_STRUCTS,
   WGSL_PRELUDE,
   WGSL_SYNAPSE_STRUCTS,
-  WGSL_WORKGROUP_SIZE,
 } from './common';
 
 export { SYNAPSE_CURRENT_SCALE } from './common';
@@ -118,7 +117,7 @@ fn magnesiumBlock(mgBlock : f32, mgConcentration : f32, vPost : f32) -> f32 {
   return 1.0 / (1.0 + mgBlock * (mgConcentration / 3.57) * safeExp(-0.062 * vPost));
 }
 
-@compute @workgroup_size(${WGSL_WORKGROUP_SIZE})
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let index = gid.x;
   if (index >= uni.count) {
@@ -147,10 +146,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   if (stpActive) {
     state.stpR = state.stpR + (1.0 - state.stpR) * relaxFactor(dt, tauRecovery);
+    // Utilisation relaxes back to the baseline the synapse was configured with,
+    // not to zero: the baseline is the release probability of a rested synapse,
+    // and facilitation is the excess above it that a burst builds up.
     if (tauFacilitation > MIN_TAU) {
-      state.stpU = state.stpU * exp(-dt / tauFacilitation);
+      state.stpU = relax(state.stpU, stpUtilisation, dt, tauFacilitation);
     } else {
-      state.stpU = 0.0;
+      state.stpU = stpUtilisation;
     }
   }
 
@@ -165,8 +167,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       } else {
         state.stpU = stpUtilisation;
       }
-      efficacy = state.stpU * state.stpR;
-      state.stpR = max(state.stpR - efficacy, 0.0);
+      // The vesicles this release consumes.
+      let released = state.stpU * state.stpR;
+      state.stpR = max(state.stpR - released, 0.0);
+      // Dividing by the baseline utilisation is what makes the stored weight
+      // mean the peak conductance of a rested synapse. Without it a depressing
+      // synapse would deliver only its utilisation fraction of the weight the
+      // editor shows, which for the usual U in 0.2..0.5 is a two- to five-fold
+      // shortfall against the CPU reference.
+      efficacy = released / max(stpUtilisation, EPSILON);
     }
     let amplitude =
       weights[index] * uni.gain * efficacy * release * dualExponentialNorm(tauRise, tauDecay);
@@ -231,7 +240,7 @@ struct StdpUniforms {
 @group(0) @binding(4) var<storage, read_write> traces : array<SynapseTraces>;
 @group(0) @binding(5) var<storage, read> outputs : array<NeuronOutput>;
 
-@compute @workgroup_size(${WGSL_WORKGROUP_SIZE})
+@compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let index = gid.x;
   if (index >= uni.count) {

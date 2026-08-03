@@ -105,7 +105,11 @@ fn gateStep(x : f32, alpha : f32, beta : f32, dt : f32) -> f32 {
 /** PCG hash and the derived uniform / normal deviates. Stateless and stable. */
 export const WGSL_RANDOM = /* wgsl */ `
 const TWO_PI : f32 = 6.283185307179586;
-const INV_U32 : f32 = 2.3283064365386963e-10;
+// 1 / 2^24. Twenty-four bits is the widest integer range f32 represents exactly,
+// so a quotient built from that many bits is always strictly below 1. Using all
+// 32 bits instead rounds the top of the range up to exactly 1.0, which breaks
+// the half-open interval randomUnit promises and can hand log() a zero.
+const INV_U24 : f32 = 5.9604644775390625e-8;
 
 fn pcgHash(input : u32) -> u32 {
   let state = input * 747796405u + 2891336453u;
@@ -119,7 +123,7 @@ fn hashCombine(a : u32, b : u32) -> u32 {
 
 /** Uniform deviate in [0,1). */
 fn randomUnit(seed : u32) -> f32 {
-  return f32(pcgHash(seed)) * INV_U32;
+  return f32(pcgHash(seed) >> 8u) * INV_U24;
 }
 
 /** Standard normal deviate via Box-Muller; one of the two outputs is kept. */

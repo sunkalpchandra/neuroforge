@@ -8,6 +8,12 @@ import { nextPowerOfTwo } from './internal';
  * allocation on any query path, because these queries run per frame while the
  * pointer moves over a network of tens of thousands of neurons.
  *
+ * Every query is also bounded by the point count: when the cell range a query
+ * would walk is larger than the number of points in the grid, it scans the
+ * points instead. Without that the cost depends on how far apart the network is
+ * spread rather than on how big it is, and a handful of distant clusters turns a
+ * single neighbour query into tens of millions of probes over empty cells.
+ *
  * `rebuild` keeps a reference to the caller's position array rather than copying
  * it. Positions may change in place between rebuilds — the grid will simply get
  * stale — but the array itself must not be reallocated without a rebuild.
@@ -206,6 +212,14 @@ export class SpatialHash {
     const z0 = Math.max(cellCoord(z - radius, inv), this.#minCellZ);
     const z1 = Math.min(cellCoord(z + radius, inv), this.#maxCellZ);
 
+    const spanX = x1 - x0 + 1;
+    const spanY = y1 - y0 + 1;
+    const spanZ = z1 - z0 + 1;
+    if (spanX <= 0 || spanY <= 0 || spanZ <= 0) return 0;
+    if (spanX * spanY * spanZ > this.#count) {
+      return this.#radiusLinear(x, y, z, r2, out);
+    }
+
     const pos = this.#positions;
     const items = this.#items;
     const starts = this.#bucketStart;
@@ -249,30 +263,68 @@ export class SpatialHash {
     this.#bestIndex = -1;
     this.#bestPrimary = maxRadius * maxRadius;
 
-    const span = Math.max(
-      Math.max(cx - this.#minCellX, this.#maxCellX - cx),
-      Math.max(
-        Math.max(cy - this.#minCellY, this.#maxCellY - cy),
-        Math.max(cz - this.#minCellZ, this.#maxCellZ - cz),
-      ),
-    );
-    const reach = Math.floor(maxRadius * inv) + 1;
-    const maxRing = Math.min(span, reach);
+    const minX = this.#minCellX;
+    const minY = this.#minCellY;
+    const minZ = this.#minCellZ;
+    const maxX = this.#maxCellX;
+    const maxY = this.#maxCellY;
+    const maxZ = this.#maxCellZ;
 
-    for (let ring = 0; ring <= maxRing; ring += 1) {
+    // Shells nearer than the occupied region are empty by construction, so the
+    // walk starts at the Chebyshev distance to it. Without this, a query far
+    // outside the network would step through every intervening empty shell.
+    const firstRing = Math.max(
+      0,
+      Math.max(minX - cx, cx - maxX),
+      Math.max(minY - cy, cy - maxY),
+      Math.max(minZ - cz, cz - maxZ),
+    );
+    const lastRing = Math.min(
+      Math.max(
+        Math.max(cx - minX, maxX - cx),
+        Math.max(cy - minY, maxY - cy),
+        Math.max(cz - minZ, maxZ - cz),
+      ),
+      Math.floor(maxRadius * inv) + 1,
+    );
+    if (firstRing > lastRing) return -1;
+
+    const spanX = Math.min(cx + lastRing, maxX) - Math.max(cx - lastRing, minX) + 1;
+    const spanY = Math.min(cy + lastRing, maxY) - Math.max(cy - lastRing, minY) + 1;
+    const spanZ = Math.min(cz + lastRing, maxZ) - Math.max(cz - lastRing, minZ) + 1;
+    if (spanX <= 0 || spanY <= 0 || spanZ <= 0) return -1;
+    if (spanX * spanY * spanZ > this.#count) return this.#nearestLinear(x, y, z);
+
+    for (let ring = firstRing; ring <= lastRing; ring += 1) {
       // Anything in a cell `ring` shells out is at least (ring-1) cells away, so
       // once that floor exceeds the current best no later shell can improve it.
       if (this.#bestIndex >= 0 && ring > 1) {
         const floorDistance = (ring - 1) * cs;
         if (floorDistance * floorDistance > this.#bestPrimary) break;
       }
-      for (let ix = cx - ring; ix <= cx + ring; ix += 1) {
+      // Every loop is clipped to the occupied region, so the cost of a shell is
+      // proportional to the cells it actually contains.
+      const x0 = Math.max(cx - ring, minX);
+      const x1 = Math.min(cx + ring, maxX);
+      const y0 = Math.max(cy - ring, minY);
+      const y1 = Math.min(cy + ring, maxY);
+      const z0 = Math.max(cz - ring, minZ);
+      const z1 = Math.min(cz + ring, maxZ);
+      const zLow = cz - ring;
+      const zHigh = cz + ring;
+      for (let ix = x0; ix <= x1; ix += 1) {
         const onX = ix === cx - ring || ix === cx + ring;
-        for (let iy = cy - ring; iy <= cy + ring; iy += 1) {
-          const onShell = onX || iy === cy - ring || iy === cy + ring;
-          for (let iz = cz - ring; iz <= cz + ring; iz += 1) {
-            if (!onShell && iz !== cz - ring && iz !== cz + ring) continue;
-            this.#testCellNearest(ix, iy, iz, x, y, z);
+        for (let iy = y0; iy <= y1; iy += 1) {
+          if (onX || iy === cy - ring || iy === cy + ring) {
+            for (let iz = z0; iz <= z1; iz += 1) {
+              this.#testCellNearest(ix, iy, iz, x, y, z);
+            }
+          } else {
+            // Interior of the shell: only the two z faces are on it.
+            if (zLow >= z0 && zLow <= z1) this.#testCellNearest(ix, iy, zLow, x, y, z);
+            if (zHigh !== zLow && zHigh >= z0 && zHigh <= z1) {
+              this.#testCellNearest(ix, iy, zHigh, x, y, z);
+            }
           }
         }
       }
@@ -315,6 +367,25 @@ export class SpatialHash {
     this.#bestPrimary = Infinity;
     this.#bestSecondary = Infinity;
 
+    // A hit can be up to `pick` away from the ray, so cells that far to the side
+    // of the walked cell have to be tested too.
+    const pad = Math.ceil(pick * inv);
+    const threshold2 = pick * pick;
+    const maxSteps =
+      this.#maxCellX -
+      this.#minCellX +
+      (this.#maxCellY - this.#minCellY) +
+      (this.#maxCellZ - this.#minCellZ) +
+      6 * (pad + 1) +
+      3;
+
+    const side = 2 * pad + 1;
+    if ((maxSteps + 1) * side * side * side > this.#count) {
+      return this.#rayLinear(ox, oy, oz, rx, ry, rz, threshold2);
+    }
+
+    const lookBehind = (pad + 1) * cs * SQRT3;
+
     rayOrigin[0] = ox;
     rayOrigin[1] = oy;
     rayOrigin[2] = oz;
@@ -340,19 +411,6 @@ export class SpatialHash {
         ddaTDelta[a] = Infinity;
       }
     }
-
-    // A hit can be up to `pick` away from the ray, so cells that far to the side
-    // of the walked cell have to be tested too.
-    const pad = Math.ceil(pick * inv);
-    const threshold2 = pick * pick;
-    const lookBehind = (pad + 1) * cs * SQRT3;
-    const maxSteps =
-      this.#maxCellX -
-      this.#minCellX +
-      (this.#maxCellY - this.#minCellY) +
-      (this.#maxCellZ - this.#minCellZ) +
-      6 * (pad + 1) +
-      3;
 
     let travel = tEnter;
     for (let step = 0; step <= maxSteps; step += 1) {
@@ -415,23 +473,108 @@ export class SpatialHash {
     }
   }
 
+  #considerNearest(index: number, x: number, y: number, z: number): void {
+    const pos = this.#positions;
+    const p = index * 3;
+    const dx = pos[p] - x;
+    const dy = pos[p + 1] - y;
+    const dz = pos[p + 2] - z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < this.#bestPrimary || (this.#bestIndex < 0 && d2 <= this.#bestPrimary)) {
+      this.#bestPrimary = d2;
+      this.#bestIndex = index;
+    }
+  }
+
   #testCellNearest(cx: number, cy: number, cz: number, x: number, y: number, z: number): void {
     const bucket = this.#find(cx, cy, cz);
     if (bucket < 0) return;
-    const pos = this.#positions;
     const items = this.#items;
     const end = this.#bucketEnd[bucket];
     for (let e = this.#bucketStart[bucket]; e < end; e += 1) {
-      const index = items[e];
-      const p = index * 3;
+      this.#considerNearest(items[e], x, y, z);
+    }
+  }
+
+  /**
+   * Exhaustive fallbacks, used when a query's cell range holds more cells than
+   * the grid holds points.
+   *
+   * A uniform grid only pays off while the cells a query touches are fewer than
+   * the points it covers. Past that the probes over empty space dominate: a
+   * radius query spanning 300 cells per axis costs 27 million probes whether the
+   * grid holds ten points or ten thousand, and a network laid out in a few
+   * distant clusters hits exactly that. These run in O(count) and return exactly
+   * what the corresponding grid walk would, so the choice is invisible to the
+   * caller apart from how long it takes.
+   */
+  #radiusLinear(x: number, y: number, z: number, r2: number, out: Uint32Array): number {
+    const pos = this.#positions;
+    const n = this.#count;
+    const limit = out.length;
+    let found = 0;
+    for (let i = 0; i < n; i += 1) {
+      const p = i * 3;
       const dx = pos[p] - x;
       const dy = pos[p + 1] - y;
       const dz = pos[p + 2] - z;
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < this.#bestPrimary || (this.#bestIndex < 0 && d2 <= this.#bestPrimary)) {
-        this.#bestPrimary = d2;
-        this.#bestIndex = index;
+      if (dx * dx + dy * dy + dz * dz <= r2) {
+        out[found] = i;
+        found += 1;
+        if (found >= limit) return found;
       }
+    }
+    return found;
+  }
+
+  #nearestLinear(x: number, y: number, z: number): number {
+    const n = this.#count;
+    for (let i = 0; i < n; i += 1) this.#considerNearest(i, x, y, z);
+    return this.#bestIndex;
+  }
+
+  #rayLinear(
+    ox: number,
+    oy: number,
+    oz: number,
+    rx: number,
+    ry: number,
+    rz: number,
+    threshold2: number,
+  ): number {
+    const n = this.#count;
+    for (let i = 0; i < n; i += 1) this.#considerRay(i, ox, oy, oz, rx, ry, rz, threshold2);
+    return this.#bestIndex;
+  }
+
+  #considerRay(
+    index: number,
+    ox: number,
+    oy: number,
+    oz: number,
+    rx: number,
+    ry: number,
+    rz: number,
+    threshold2: number,
+  ): void {
+    const pos = this.#positions;
+    const p = index * 3;
+    const vx = pos[p] - ox;
+    const vy = pos[p + 1] - oy;
+    const vz = pos[p + 2] - oz;
+    // Points behind the origin are measured from the origin itself, so a
+    // camera sitting inside a neuron still picks it.
+    let along = vx * rx + vy * ry + vz * rz;
+    if (along < 0) along = 0;
+    const ex = vx - rx * along;
+    const ey = vy - ry * along;
+    const ez = vz - rz * along;
+    const perp2 = ex * ex + ey * ey + ez * ez;
+    if (perp2 > threshold2) return;
+    if (along < this.#bestPrimary || (along === this.#bestPrimary && perp2 < this.#bestSecondary)) {
+      this.#bestIndex = index;
+      this.#bestPrimary = along;
+      this.#bestSecondary = perp2;
     }
   }
 
@@ -449,32 +592,10 @@ export class SpatialHash {
   ): void {
     const bucket = this.#find(cx, cy, cz);
     if (bucket < 0) return;
-    const pos = this.#positions;
     const items = this.#items;
     const end = this.#bucketEnd[bucket];
     for (let e = this.#bucketStart[bucket]; e < end; e += 1) {
-      const index = items[e];
-      const p = index * 3;
-      const vx = pos[p] - ox;
-      const vy = pos[p + 1] - oy;
-      const vz = pos[p + 2] - oz;
-      // Points behind the origin are measured from the origin itself, so a
-      // camera sitting inside a neuron still picks it.
-      let along = vx * rx + vy * ry + vz * rz;
-      if (along < 0) along = 0;
-      const ex = vx - rx * along;
-      const ey = vy - ry * along;
-      const ez = vz - rz * along;
-      const perp2 = ex * ex + ey * ey + ez * ez;
-      if (perp2 > threshold2) continue;
-      if (
-        along < this.#bestPrimary ||
-        (along === this.#bestPrimary && perp2 < this.#bestSecondary)
-      ) {
-        this.#bestIndex = index;
-        this.#bestPrimary = along;
-        this.#bestSecondary = perp2;
-      }
+      this.#considerRay(items[e], ox, oy, oz, rx, ry, rz, threshold2);
     }
   }
 }

@@ -94,7 +94,12 @@ void main() {
 
   mat4 modelView = viewMatrix * modelMatrix;
   vec4 viewPosition = modelView * vec4(world, 1.0);
-  vec3 viewTangent = normalize(mat3(modelView) * tangent);
+
+  // A self-connection with no sag collapses to a point and has no tangent, so
+  // fall back to an arbitrary direction rather than normalising a zero vector.
+  vec3 rawTangent = mat3(modelView) * tangent;
+  float tangentLength = length(rawTangent);
+  vec3 viewTangent = tangentLength > 1e-6 ? rawTangent / tangentLength : vec3(0.0, 1.0, 0.0);
 
   // In view space the camera looks down -z, so the screen-plane normal of the
   // ribbon is the tangent crossed with the view axis. The fallback covers an
@@ -169,7 +174,7 @@ void main() {
 
   float alpha = uOpacity * core * (0.35 + 0.65 * vActivity + impulse);
   // Fade both ends so the ribbon meets the somata instead of stopping at a cap.
-  alpha *= smoothstep(0.0, 0.04, vT) * smoothstep(1.0, 0.94, vT);
+  alpha *= smoothstep(0.0, 0.04, vT) * (1.0 - smoothstep(0.96, 1.0, vT));
 
   color = applyFog(color, length(vViewPosition), uFogDensity, uFogColor);
 

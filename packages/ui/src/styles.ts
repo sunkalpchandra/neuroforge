@@ -62,8 +62,8 @@ const RUNTIME_STYLES = `
 .nf-anim-dialog[data-state='open']{animation:nf-dialog-in 240ms cubic-bezier(.16,1,.3,1)}
 .nf-anim-dialog[data-state='closed']{animation:nf-dialog-out 150ms cubic-bezier(.65,0,.35,1)}
 .nf-anim-pop{transform-origin:var(--radix-popover-content-transform-origin,var(--radix-tooltip-content-transform-origin,var(--radix-select-content-transform-origin,var(--radix-dropdown-menu-content-transform-origin,center))))}
-.nf-anim-pop[data-state='open'],.nf-anim-pop[data-state='delayed-open']{animation:nf-pop-in 140ms cubic-bezier(.16,1,.3,1)}
-.nf-anim-pop[data-state='closed'],.nf-anim-pop[data-state='instant-open']{animation:nf-pop-out 110ms cubic-bezier(.65,0,.35,1)}
+.nf-anim-pop[data-state='open'],.nf-anim-pop[data-state='delayed-open'],.nf-anim-pop[data-state='instant-open']{animation:nf-pop-in 140ms cubic-bezier(.16,1,.3,1)}
+.nf-anim-pop[data-state='closed']{animation:nf-pop-out 110ms cubic-bezier(.65,0,.35,1)}
 .nf-anim-toast-in{animation:nf-toast-in 260ms cubic-bezier(.16,1,.3,1)}
 .nf-checker{background-image:linear-gradient(45deg,rgb(255 255 255/.12) 25%,transparent 25%),linear-gradient(-45deg,rgb(255 255 255/.12) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,rgb(255 255 255/.12) 75%),linear-gradient(-45deg,transparent 75%,rgb(255 255 255/.12) 75%);background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}
 @media (prefers-reduced-motion:reduce){.nf-anim-overlay,.nf-anim-dialog,.nf-anim-pop,.nf-anim-toast-in{animation-duration:1ms}}

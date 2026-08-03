@@ -541,7 +541,8 @@ export function exportNumpy(circuit: Circuit): string {
   out.push(
     "    print('%d spikes, %.2f Hz mean rate' % (counts.sum(), counts.sum() / max(N * seconds, 1e-9)))",
   );
-  out.push("    print('voltage range: %.2f .. %.2f mV' % (voltage_log.min(), voltage_log.max()))");
+  out.push('    if N > 0:');
+  out.push("        print('voltage range: %.2f .. %.2f mV' % (voltage_log.min(), voltage_log.max()))");
 
   return `${out.join('\n')}\n`;
 }

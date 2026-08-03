@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { cn } from './cn';
+import { clamp } from './numeric';
 
 export interface SparklineProps
   extends Omit<React.SVGAttributes<SVGSVGElement>, 'values' | 'min' | 'max' | 'fill' | 'color'> {
@@ -75,10 +76,22 @@ function resolveExtent(
     lo -= pad;
     hi += pad;
   }
-  return {
-    lo: min !== undefined && Number.isFinite(min) ? min : lo,
-    hi: max !== undefined && Number.isFinite(max) ? max : hi,
-  };
+  let resolvedLo = min !== undefined && Number.isFinite(min) ? min : lo;
+  let resolvedHi = max !== undefined && Number.isFinite(max) ? max : hi;
+  // A pinned bound can invert or collapse the axis — `min` above every sample,
+  // or `min === max`. Normalise here so the caller downstream can divide by the
+  // span unconditionally instead of plotting an upside-down or zero-height trace.
+  if (resolvedHi < resolvedLo) {
+    const swap = resolvedLo;
+    resolvedLo = resolvedHi;
+    resolvedHi = swap;
+  }
+  if (resolvedHi === resolvedLo) {
+    const pad = Math.max(Math.abs(resolvedHi) * 0.05, 0.5);
+    resolvedLo -= pad;
+    resolvedHi += pad;
+  }
+  return { lo: resolvedLo, hi: resolvedHi };
 }
 
 /**
@@ -130,13 +143,15 @@ export const Sparkline = React.forwardRef<SVGSVGElement, SparklineProps>(functio
 
   const toX = (i: number): number =>
     total <= 1 ? padding + innerWidth * 0.5 : padding + (i / (total - 1)) * innerWidth;
+  // Samples outside an explicitly pinned axis saturate at its edge; without the
+  // clamp they would be drawn outside the box, which `overflow-visible` (needed
+  // so the stroke is not shaved) would happily render on top of neighbouring UI.
   const toY = (value: number): number =>
-    span === 0 ? bottom : bottom - ((value - extent.lo) / span) * innerHeight;
+    span === 0
+      ? bottom
+      : clamp(bottom - ((value - extent.lo) / span) * innerHeight, padding, bottom);
 
-  const anchorY =
-    baseline !== undefined && Number.isFinite(baseline)
-      ? Math.min(Math.max(toY(baseline), padding), bottom)
-      : bottom;
+  const anchorY = baseline !== undefined && Number.isFinite(baseline) ? toY(baseline) : bottom;
 
   const strokeSegments: string[] = [];
   const fillSegments: string[] = [];
@@ -178,8 +193,16 @@ export const Sparkline = React.forwardRef<SVGSVGElement, SparklineProps>(functio
   flushRun(total - 1);
 
   const stroke = color ?? 'currentColor';
+  // Only drawn when it genuinely falls inside the axis. Saturating it at an edge
+  // the way samples are saturated would assert that the threshold sits at the top
+  // or bottom of the range, which is the opposite of what a reference line means.
   const thresholdY =
-    threshold !== undefined && Number.isFinite(threshold) ? toY(threshold) : undefined;
+    threshold !== undefined &&
+    Number.isFinite(threshold) &&
+    threshold >= extent.lo &&
+    threshold <= extent.hi
+      ? toY(threshold)
+      : undefined;
 
   return (
     <svg
@@ -204,7 +227,7 @@ export const Sparkline = React.forwardRef<SVGSVGElement, SparklineProps>(functio
         </defs>
       )}
 
-      {thresholdY !== undefined && thresholdY >= 0 && thresholdY <= height && (
+      {thresholdY !== undefined && (
         <line
           x1={padding}
           x2={width - padding}

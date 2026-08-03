@@ -2,6 +2,8 @@ export type { Integrator, StepResult } from './types';
 export { EMPTY_STEP_RESULT } from './types';
 
 export { CpuIntegrator } from './integrator-cpu';
+export { GpuIntegrator } from './integrator-gpu';
+export { WasmIntegrator, createIntegrator } from './backend';
 export { SimulationEngine } from './engine';
 export { ProbeRecorder } from './probes';
 export type { ProbeSignal } from './probes';

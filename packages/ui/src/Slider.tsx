@@ -159,6 +159,9 @@ export const Slider = React.forwardRef<HTMLSpanElement, SliderProps>(function Sl
         onKeyDown={handleKeyDown}
         onDoubleClick={handleDoubleClick}
         aria-describedby={rest['aria-describedby'] ?? field.describedBy}
+        aria-labelledby={
+          rest['aria-labelledby'] ?? (rest['aria-label'] === undefined ? field.labelledBy : undefined)
+        }
         className={cn(
           'relative flex h-5 min-w-0 flex-1 touch-none select-none items-center',
           isDisabled && 'pointer-events-none opacity-40',

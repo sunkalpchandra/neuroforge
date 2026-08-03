@@ -80,9 +80,15 @@ varying float vFlags;
 
 const float PI = 3.141592653589793;
 
-/** Extract one bit from a small non-negative integer carried in a float. */
+/**
+ * Extract one bit from a small non-negative integer carried in a float.
+ *
+ * The epsilon absorbs the rounding a varying picks up while being interpolated
+ * across a triangle whose three vertices all carry the same value; without it an
+ * exact 3.0 can arrive as 2.9999998 and lose its low bit.
+ */
 float flagBit(float flags, float bitValue) {
-  return mod(floor(flags / bitValue + 0.5), 2.0);
+  return mod(floor(flags / bitValue + 0.001), 2.0);
 }
 
 void main() {
@@ -105,13 +111,29 @@ void main() {
   vec3 H = normalize(L + V);
   float ndh = max(dot(N, H), 0.0);
   float vdh = clamp(dot(V, H), 0.0, 1.0);
+  float ndlSat = max(ndl, 0.0);
   float roughness = clamp(uRoughness, 0.045, 1.0);
   float alpha = roughness * roughness;
   float alpha2 = alpha * alpha;
   float d = ndh * ndh * (alpha2 - 1.0) + 1.0;
-  float distribution = alpha2 / max(PI * d * d, 1e-4);
+  // The floor here only exists to rule out 0/0; it must not bind. Because
+  // roughness is clamped above, d is at least alpha2 = 4.1e-6 and PI*d*d is at
+  // least 5e-11, so 1e-12 never engages. A larger floor would cap the highlight
+  // of every surface smoother than roughness 0.274 and invert the response,
+  // making a mirror-smooth neuron duller than a matte one.
+  float distribution = alpha2 / max(PI * d * d, 1e-12);
   float fresnel = 0.04 + 0.96 * pow(1.0 - vdh, 5.0);
-  vec3 specular = uLightColor * distribution * fresnel * step(0.0, ndl);
+
+  // Height-correlated Smith visibility. This term carries the 1/(4 ndl ndv)
+  // denominator of the microfacet BRDF, so the specular lobe integrates to at
+  // most the incident light. Distribution alone peaks at 1/(pi alpha2), which is
+  // ~8e4 at the minimum roughness above: without the visibility term and the
+  // ndl factor the highlight is not a highlight but a hole punched through the
+  // bloom threshold.
+  float lambdaV = ndlSat * sqrt(ndv * ndv * (1.0 - alpha2) + alpha2);
+  float lambdaL = ndv * sqrt(ndlSat * ndlSat * (1.0 - alpha2) + alpha2);
+  float visibility = 0.5 / max(lambdaV + lambdaL, 1e-5);
+  vec3 specular = uLightColor * distribution * visibility * fresnel * ndlSat;
 
   float rim = pow(1.0 - ndv, max(uRimPower, 0.5)) * uRimStrength;
 

@@ -32,15 +32,6 @@ import { migrateCircuit } from '../migrate';
 /** Discriminator written at the top of every exported file. */
 export const DOCUMENT_KIND = 'neuroforge.circuit';
 
-/** The envelope written to disk. The circuit itself is nested under `circuit`. */
-export interface CircuitDocument {
-  kind: typeof DOCUMENT_KIND;
-  schema: number;
-  application: string;
-  exportedAt: string;
-  circuit: Circuit;
-}
-
 /**
  * Ordered plain-object views. TypeScript cannot enforce key order, so each
  * builder below writes the keys explicitly in document order.
@@ -296,7 +287,7 @@ function probe(p: Probe): Json {
 }
 
 /** The circuit as an ordered plain object, ready for `JSON.stringify`. */
-export function circuitToJson(circuit: Circuit): Json {
+function circuitToJson(circuit: Circuit): Json {
   const s = circuit.simulation;
   const c = circuit.camera;
   const r = circuit.render;

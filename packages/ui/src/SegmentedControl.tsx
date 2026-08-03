@@ -4,6 +4,7 @@ import * as React from 'react';
 import { cn } from './cn';
 import { FOCUS_RING_INSET, MOTION_SLOW } from './styles';
 import { useEventCallback } from './hooks';
+import { useFieldControl } from './Field';
 
 export interface SegmentedOption<T extends string> {
   value: T;
@@ -36,11 +37,13 @@ function SegmentedControlInner<T extends string>(
     options,
     size = 'md',
     fullWidth = false,
+    id,
     className,
     ...props
   }: SegmentedControlProps<T>,
   ref: React.ForwardedRef<HTMLDivElement>,
 ): React.ReactElement {
+  const field = useFieldControl(id);
   const activeIndex = options.findIndex((option) => option.value === value);
   const buttonsRef = React.useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -57,6 +60,8 @@ function SegmentedControlInner<T extends string>(
   });
 
   const handleKeyDown = useEventCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    props.onKeyDown?.(event);
+    if (event.defaultPrevented) return;
     const current = activeIndex < 0 ? 0 : activeIndex;
     switch (event.key) {
       case 'ArrowRight':
@@ -83,9 +88,19 @@ function SegmentedControlInner<T extends string>(
   });
 
   return (
+    // `props` is spread first: the grid template and the roving-focus key handler
+    // below are load-bearing, and a caller passing `style` or `onKeyDown` must not
+    // silently replace them. Their values are folded in instead.
     <div
+      {...props}
       ref={ref}
+      id={field.id}
       role="radiogroup"
+      aria-labelledby={
+        props['aria-labelledby'] ??
+        (props['aria-label'] === undefined ? field.labelledBy : undefined)
+      }
+      aria-describedby={props['aria-describedby'] ?? field.describedBy}
       onKeyDown={handleKeyDown}
       className={cn(
         'relative isolate grid gap-0 rounded-control border border-hairline bg-black/25 p-0.5',
@@ -93,8 +108,10 @@ function SegmentedControlInner<T extends string>(
         fullWidth ? 'w-full' : 'w-max',
         className,
       )}
-      style={{ gridTemplateColumns: `repeat(${Math.max(options.length, 1)}, minmax(0, 1fr))` }}
-      {...props}
+      style={{
+        ...props.style,
+        gridTemplateColumns: `repeat(${Math.max(options.length, 1)}, minmax(0, 1fr))`,
+      }}
     >
       {/*
         The indicator occupies the first grid cell, so its width is always one
