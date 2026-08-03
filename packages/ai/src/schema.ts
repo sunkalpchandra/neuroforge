@@ -4,6 +4,7 @@ import {
   PLASTICITY_KINDS,
   RECEPTOR_KINDS,
 } from '@neuroforge/shared';
+import type { ConnectivityRule } from '@neuroforge/shared';
 import { ALL_PARAM_KEYS, PARAM_KEYS } from './params';
 
 /** The tool the model is required to call. */
@@ -13,6 +14,36 @@ export const CIRCUIT_TOOL_NAME = 'build_circuit';
 export const MAX_POPULATION_SIZE = 20_000;
 export const MAX_TOTAL_NEURONS = 200_000;
 export const MAX_ACTIONS = 64;
+/** A projection above this size would lock the browser up long before it finished. */
+export const MAX_SYNAPSES_PER_PROJECTION = 2_000_000;
+
+/**
+ * Upper bound on the synapses a rule expands into. `validatePlan` rejects a
+ * projection above the cap, and the offline planner thins its rules against the
+ * same estimate so it never emits one that will be thrown away.
+ */
+export function estimateSynapses(
+  rule: ConnectivityRule,
+  sourceSize: number,
+  targetSize: number,
+): number {
+  switch (rule.kind) {
+    case 'all-to-all':
+      return sourceSize * targetSize;
+    case 'random':
+      return sourceSize * targetSize * rule.probability;
+    case 'one-to-one':
+      return Math.min(sourceSize, targetSize);
+    case 'gaussian':
+      return sourceSize * targetSize * rule.maxProbability;
+    case 'distance-threshold':
+      return sourceSize * targetSize * rule.probability;
+    case 'fixed-in-degree':
+      return targetSize * rule.degree;
+    case 'fixed-out-degree':
+      return sourceSize * rule.degree;
+  }
+}
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };

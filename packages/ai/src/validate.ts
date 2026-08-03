@@ -31,11 +31,15 @@ import {
   hashText,
 } from './coerce';
 import { declaredKind, sanitiseNeuronParams } from './params';
-import { MAX_ACTIONS, MAX_POPULATION_SIZE, MAX_TOTAL_NEURONS } from './schema';
+import {
+  MAX_ACTIONS,
+  MAX_POPULATION_SIZE,
+  MAX_SYNAPSES_PER_PROJECTION,
+  MAX_TOTAL_NEURONS,
+  estimateSynapses,
+} from './schema';
 import type { AiPlan, CircuitAction, NamedProjectionSpec, PopulationSpec } from './types';
 
-/** A projection above this size would lock the browser up long before it finished. */
-const MAX_SYNAPSES_PER_PROJECTION = 2_000_000;
 const MAX_NAME_LENGTH = 64;
 const MAX_PROJECTION_NAME_LENGTH = 96;
 const MAX_SUMMARY_LENGTH = 1200;
@@ -459,26 +463,6 @@ function validateRule(value: unknown, seed: number): ConnectivityRule | null {
     }
     default:
       return null;
-  }
-}
-
-/** Upper bound on the synapses a rule expands into, used to reject runaway wiring. */
-function estimateSynapses(rule: ConnectivityRule, sourceSize: number, targetSize: number): number {
-  switch (rule.kind) {
-    case 'all-to-all':
-      return sourceSize * targetSize;
-    case 'random':
-      return sourceSize * targetSize * rule.probability;
-    case 'one-to-one':
-      return Math.min(sourceSize, targetSize);
-    case 'gaussian':
-      return sourceSize * targetSize * rule.maxProbability;
-    case 'distance-threshold':
-      return sourceSize * targetSize * rule.probability;
-    case 'fixed-in-degree':
-      return targetSize * rule.degree;
-    case 'fixed-out-degree':
-      return sourceSize * rule.degree;
   }
 }
 

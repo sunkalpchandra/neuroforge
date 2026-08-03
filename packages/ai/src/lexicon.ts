@@ -283,6 +283,18 @@ export const REGION_WORDS: readonly (readonly [string, RegionProfile])[] = [
   ['striatum', STRIATUM],
 ];
 
+/**
+ * Region word to the prefix that generated population names carry, lower-cased,
+ * so "the thalamic cells" can be matched against "Thalamus Stellate". Regions
+ * with no label are left out: they prefix nothing.
+ */
+export const REGION_LABELS: Readonly<Record<string, string>> = Object.fromEntries(
+  REGION_WORDS.filter(([, profile]) => profile.label !== '').map(([word, profile]) => [
+    word,
+    profile.label.toLowerCase(),
+  ]),
+);
+
 export interface RhythmBand {
   readonly name: string;
   readonly minHz: number;

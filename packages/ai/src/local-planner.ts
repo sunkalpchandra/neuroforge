@@ -22,6 +22,7 @@ import {
   PHRASE_BOUNDARIES,
   POLARITY_WORDS,
   RECEPTOR_WORDS,
+  REGION_LABELS,
   REGION_WORDS,
   REMOVAL_VERBS,
   RHYTHM_BANDS,
@@ -38,7 +39,7 @@ import {
   layoutRadius,
   sustainedDrive,
 } from './presets';
-import { MAX_POPULATION_SIZE } from './schema';
+import { MAX_POPULATION_SIZE, MAX_SYNAPSES_PER_PROJECTION, estimateSynapses } from './schema';
 import { PromptScan, isCountToken, parseCount, titleCase } from './text';
 import type { AiPlan, CircuitAction, NamedProjectionSpec, PopulationSpec } from './types';
 
@@ -95,6 +96,9 @@ const MAX_REPEATED_POPULATIONS = 8;
  * global pattern resets `lastIndex` itself.
  */
 const WORD_RE = /[a-z0-9]+(?:[-'][a-z0-9]+)*/g;
+/** An injected current in picoamps. `PromptScan.matchAll` resets `lastIndex`. */
+const AMPLITUDE_RE = /(\d+(?:\.\d+)?)\s*pa\b/g;
+const AMPLITUDE_ONCE_RE = /(\d+(?:\.\d+)?)\s*pa\b/;
 /** Words that say an edit applies to the whole circuit rather than one population. */
 const GLOBAL_SCOPE_WORDS = ['everything', 'every', 'all', 'both', 'each', 'entire', 'whole'];
 /** Words joining conjuncts that share a governing verb. */
@@ -755,6 +759,12 @@ class Planner {
       // Generated names end in the same head nouns every phrase uses, so
       // matching on one would make "the neurons" name "Pyramidal Neurons".
       if (!HEAD_NOUNS.has(word) && nameWords.includes(word)) score += 3;
+      // A region word names the prefix the planner puts on the populations it
+      // generates, so "the thalamic cells" points at "Thalamus Stellate". This
+      // one is positive evidence only: several region words share a label
+      // (`hippocampal` resolves to CA1), so a mismatch says very little.
+      const region = REGION_LABELS[word];
+      if (region !== undefined && nameWords.includes(region)) score += 3;
       score += agreement(POLARITY_WORDS[word], candidate.polarity);
       score += agreement(ARCHETYPE_WORDS[word], candidate.archetype);
       score += agreement(MODEL_WORDS[word], candidate.model);
@@ -896,13 +906,69 @@ class Planner {
     return source.polarity === 'inhibitory' ? 'gabaa' : 'ampa';
   }
 
+  /**
+   * Thin a rule until it fits the per-projection synapse budget `validatePlan`
+   * enforces. Emitting a projection over the cap would simply have it dropped
+   * after the fact, leaving the populations it was meant to join unconnected, so
+   * the planner spends the budget it has rather than losing the whole projection.
+   * Null when the rule has no density to give up.
+   */
+  private fitToSynapseBudget(
+    rule: ConnectivityRule,
+    source: KnownPopulation,
+    target: KnownPopulation,
+  ): ConnectivityRule | null {
+    const estimate = estimateSynapses(rule, source.size, target.size);
+    if (estimate <= MAX_SYNAPSES_PER_PROJECTION) return rule;
+    const pairs = source.size * target.size;
+    // Three decimals is the resolution the density edits already round to.
+    const probability = Math.floor((MAX_SYNAPSES_PER_PROJECTION / pairs) * 1000) / 1000;
+    const thinned = (): ConnectivityRule | null =>
+      probability <= 0
+        ? null
+        : { kind: 'random', probability, seed: this.nextSeed(), selfConnections: false };
+
+    let fitted: ConnectivityRule | null;
+    switch (rule.kind) {
+      case 'random':
+      case 'distance-threshold':
+        fitted = probability <= 0 ? null : { ...rule, probability };
+        break;
+      case 'gaussian':
+        fitted = probability <= 0 ? null : { ...rule, maxProbability: probability };
+        break;
+      case 'fixed-in-degree':
+        fitted = { ...rule, degree: Math.floor(MAX_SYNAPSES_PER_PROJECTION / target.size) };
+        break;
+      case 'fixed-out-degree':
+        fitted = { ...rule, degree: Math.floor(MAX_SYNAPSES_PER_PROJECTION / source.size) };
+        break;
+      // A one-to-one projection cannot exceed the cap while populations are
+      // capped at 20 000, so only `all-to-all` is left, and it has to become a
+      // random rule to carry a probability at all.
+      default:
+        fitted = thinned();
+        break;
+    }
+    const preamble = `${source.name} to ${target.name} at this density would need about ${Math.round(estimate)} synapses, past the ${MAX_SYNAPSES_PER_PROJECTION} limit for one projection`;
+    const kept = fitted === null ? 0 : estimateSynapses(fitted, source.size, target.size);
+    if (fitted === null || kept < 1) {
+      this.warn(`${preamble}; the connection was skipped.`);
+      return null;
+    }
+    this.warn(`${preamble}, so it was thinned to about ${Math.round(kept)}.`);
+    return fitted;
+  }
+
   private connect(
     source: KnownPopulation,
     target: KnownPopulation,
-    rule: ConnectivityRule,
+    requested: ConnectivityRule,
     receptor: ReceptorKind,
     overrides: { weightMean?: number; delayMean?: number } = {},
-  ): KnownProjection {
+  ): KnownProjection | null {
+    const rule = this.fitToSynapseBudget(requested, source, target);
+    if (rule === null) return null;
     const inhibitory = receptor === 'gabaa' || receptor === 'gabab';
     const weightMean = overrides.weightMean ?? (inhibitory ? 4.5 : 1.2);
     const delayMean = overrides.delayMean ?? (inhibitory ? 1 : 1.5);
@@ -1266,11 +1332,10 @@ class Planner {
    * `applyStimulus`, once every population the plan creates exists.
    */
   private collectStimulusRequest(): StimulusRequest | null {
-    const triggerIndex = this.firstIndexOf(STIMULUS_TRIGGERS);
-    if (triggerIndex === -1) return null;
-    const trigger = this.scan.tokens[triggerIndex].start;
-    const from = this.sentenceStart(trigger);
-    const to = this.sentenceEnd(trigger);
+    const anchor = this.stimulusAnchor();
+    if (anchor === -1) return null;
+    const from = this.sentenceStart(anchor);
+    const to = this.sentenceEnd(anchor);
     const sentence = this.scan.text.slice(from, to);
 
     let patternWord: string | null = null;
@@ -1281,7 +1346,7 @@ class Planner {
       patternAt = match.index;
       patternWord = word;
     }
-    const amplitudeMatch = /(\d+(?:\.\d+)?)\s*pa\b/.exec(sentence);
+    const amplitudeMatch = AMPLITUDE_ONCE_RE.exec(sentence);
     // A bare "drive it" says nothing about what to inject; leave it to the
     // leftover report rather than inventing a waveform.
     if (patternWord === null && amplitudeMatch === null) return null;
@@ -1293,21 +1358,40 @@ class Planner {
       frequencyMatch === null ? 10 : clamp(Number.parseFloat(frequencyMatch[1]), 0.01, 1000);
 
     // Claim from the earliest word that describes the drive, not from the
-    // trigger, so "add a poisson input …" does not leave "poisson" behind.
+    // anchor, so "add a poisson input …" does not leave "poisson" behind.
     const start = Math.min(
-      trigger,
+      anchor,
       patternWord === null ? Number.POSITIVE_INFINITY : from + patternAt,
       amplitudeMatch === null ? Number.POSITIVE_INFINITY : from + amplitudeMatch.index,
     );
     this.scan.claimChars(start, to);
 
     const tail = this.scan.text.slice(start, to);
+    // A preposition marks the target when there is one. Failing that the target
+    // is whatever an active drive verb takes directly: "drive the thalamic cells
+    // with a 50 Hz sine". Passive verbs are excluded from that second pattern
+    // because in "…driven by a poisson input" the target comes before the verb.
     const targetMatch =
-      /\b(?:to|into|onto)\s+([\s\S]{1,60}?)(?=\s+(?:with|at|using|and)\b|[.;!?]|$)/.exec(tail);
+      STIMULUS_TARGET_RE.exec(tail) ?? STIMULUS_VERB_TARGET_RE.exec(tail);
     return {
       pattern: this.stimulusPattern(patternWord ?? 'constant', amplitude, frequency),
       targetText: targetMatch === null ? null : targetMatch[1],
     };
+  }
+
+  /**
+   * Character offset the drive is described from, or -1 when the prompt asks for
+   * none. Usually a verb, but a current in picoamps is enough on its own: there
+   * is nothing else "add a 300 pA step to the basket cells" could be asking for,
+   * and it never says inject or drive.
+   */
+  private stimulusAnchor(): number {
+    const triggerIndex = this.firstIndexOf(STIMULUS_TRIGGERS);
+    if (triggerIndex !== -1) return this.scan.tokens[triggerIndex].start;
+    for (const match of this.scan.matchAll(AMPLITUDE_RE)) {
+      if (!this.scan.isRangeClaimed(match.index, match.index + match[0].length)) return match.index;
+    }
+    return -1;
   }
 
   private applyStimulus(request: StimulusRequest | null): void {
