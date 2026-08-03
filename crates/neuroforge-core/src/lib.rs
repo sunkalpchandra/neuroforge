@@ -1014,6 +1014,25 @@ impl Network {
                 if post >= n {
                     continue;
                 }
+
+                // Electrical coupling is continuous: current flows whenever the
+                // two membranes differ, with no presynaptic spike involved. The
+                // TypeScript reference and the WGSL kernel both model it this
+                // way, and routing it through the event-driven conductance state
+                // would instead make a gap junction silent between spikes.
+                if synapses.receptor[i] == synapse::RECEPTOR_GAP {
+                    let pre = synapses.pre[i] as usize;
+                    if pre < n {
+                        let delta = neurons.v[pre] as f64 - neurons.v[post] as f64;
+                        let current = synapses.weight[i] as f64 * delta * gain;
+                        if current.is_finite() {
+                            neurons.i_syn[post] += current as f32;
+                        }
+                        synapses.activity[i] = (delta.abs() * 0.02).min(1.0) as f32;
+                    }
+                    continue;
+                }
+
                 let g = if k.single {
                     synapses.g_decay[i] as f64
                 } else {
@@ -1130,6 +1149,12 @@ impl Network {
                 for &edge in out_edges.outgoing(slot as usize) {
                     let s = edge as usize;
                     if s >= m || synapses.enabled[s] == 0 {
+                        continue;
+                    }
+                    // Electrical synapses carry current continuously and are
+                    // handled in the conductance pass; queueing an event for one
+                    // would accumulate conductance nothing ever consumes.
+                    if synapses.receptor[s] == synapse::RECEPTOR_GAP {
                         continue;
                     }
                     if !rng.bernoulli(synapses.release_prob[s]) {
