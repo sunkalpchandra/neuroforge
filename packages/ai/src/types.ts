@@ -8,6 +8,9 @@ import type {
   StimulusPattern,
 } from '@neuroforge/shared';
 
+/** Re-exported so the action union below can be consumed without a second import. */
+export type { PopulationSpec, ProjectionSpec };
+
 export type AiProvider = 'anthropic' | 'openai';
 
 export interface AiCredentials {

@@ -116,22 +116,17 @@ export function emitTube(
 
   for (let i = 0; i < count; i += 1) {
     const p = i * 3;
-    let segment = 0;
-    if (i < count - 1) {
-      const ax = path[p + 3] - path[p];
-      const ay = path[p + 4] - path[p + 1];
-      const az = path[p + 5] - path[p + 2];
-      segment = Math.sqrt(ax * ax + ay * ay + az * az);
-      if (segment > EPSILON) {
-        tx = ax / segment;
-        ty = ay / segment;
-        tz = az / segment;
-      }
-    } else {
-      const bx = path[p] - path[p - 3];
-      const by = path[p + 1] - path[p - 2];
-      const bz = path[p + 2] - path[p - 1];
-      segment = Math.sqrt(bx * bx + by * by + bz * bz);
+    // The final ring has no forward neighbour, so it keeps the tangent of the
+    // one before it and measures its span backwards instead.
+    const forward = i < count - 1;
+    const ax = forward ? path[p + 3] - path[p] : path[p] - path[p - 3];
+    const ay = forward ? path[p + 4] - path[p + 1] : path[p + 1] - path[p - 2];
+    const az = forward ? path[p + 5] - path[p + 2] : path[p + 2] - path[p - 1];
+    const segment = Math.sqrt(ax * ax + ay * ay + az * az);
+    if (forward && segment > EPSILON) {
+      tx = ax / segment;
+      ty = ay / segment;
+      tz = az / segment;
     }
 
     if (!seeded) {

@@ -581,14 +581,7 @@ export class WasmIntegrator implements Integrator {
     const head = this.network.spike_log_head() >>> 0;
     const emitted = (head - this.logHead) >>> 0;
     this.logHead = head;
-    replaySpikeLog(
-      buffers.spikes,
-      emitted,
-      views.logNeuron.length,
-      head,
-      (index) => views.logNeuron[index],
-      (index) => views.logTime[index],
-    );
+    replaySpikeLog(buffers.spikes, emitted, views.logNeuron.length, head, views.logNeuron, views.logTime, 1, 0);
   }
 }
 

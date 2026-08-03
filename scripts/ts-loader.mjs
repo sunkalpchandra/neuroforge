@@ -48,5 +48,23 @@ export async function resolve(specifier, context, nextResolve) {
     if (resolved) return nextResolve(pathToFileURL(resolved).href, context);
   }
 
+  // Bare package specifiers from a script living outside the repo. Node resolves
+  // node_modules by walking up from the importing file, which finds nothing when
+  // the verification script sits in a scratch directory.
+  if (!specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.startsWith('node:')) {
+    try {
+      return await nextResolve(specifier, context);
+    } catch (error) {
+      // Retry with a parent inside the repo so Node's own resolver walks up to
+      // the workspace node_modules and honours the package's exports map, which
+      // a direct directory URL would bypass.
+      const anchor = pathToFileURL(path.join(here, 'ts-loader.mjs')).href;
+      if (context.parentURL !== anchor) {
+        return nextResolve(specifier, { ...context, parentURL: anchor });
+      }
+      throw error;
+    }
+  }
+
   return nextResolve(specifier, context);
 }

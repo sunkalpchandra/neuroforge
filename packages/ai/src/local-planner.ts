@@ -1,4 +1,4 @@
-import { defaultParams } from '@neuroforge/shared';
+import { NEURON_MODEL_LABELS, defaultParams } from '@neuroforge/shared';
 import type {
   Circuit,
   ConnectivityRule,
@@ -129,17 +129,23 @@ class Planner {
 
   run(): AiPlan {
     this.detectClear();
+    // Region and layout words are recognised now but claimed later: claiming them
+    // here would cut short the backwards walk that collects a population's
+    // modifiers, since that walk stops at the first token another pass has taken.
     this.detectRegion();
+    this.detectLayout();
     if (!this.cleared) this.seedFromCircuit();
-    const requests = this.collectConnectRequests();
+    const connections = this.collectConnectRequests();
+    const stimulus = this.collectStimulusRequest();
     this.createPopulations();
-    this.applyConnectRequests(requests);
+    this.flushDeferredClaims();
+    this.applyConnectRequests(connections);
     this.autoWire();
     this.switchModel();
     this.applyRhythm();
     this.applyDensity();
     this.applySpeed();
-    this.applyStimulus();
+    this.applyStimulus(stimulus);
     this.reportOrphans();
     this.reportLeftovers();
     return { summary: this.buildSummary(), actions: this.actions, warnings: this.warnings };
@@ -669,14 +675,22 @@ class Planner {
       this.warn(`There are no populations to switch to ${kind}.`);
       return;
     }
+    let changed = 0;
     for (const population of this.populations) {
       if (population.model === kind) continue;
       population.model = kind;
+      changed += 1;
       this.actions.push({
         type: 'tune-population',
         name: population.name,
         params: defaultParams(kind),
       });
+    }
+    // Producing no actions because the request is already satisfied is a very
+    // different thing from failing to understand it, and the generic
+    // "not understood" fallback would report the wrong one.
+    if (changed === 0) {
+      this.warn(`Every population already uses ${NEURON_MODEL_LABELS[kind]}; nothing to change.`);
     }
   }
 

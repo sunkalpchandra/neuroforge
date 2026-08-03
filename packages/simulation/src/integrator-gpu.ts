@@ -301,14 +301,21 @@ async function createPipeline(
  * the true number of events since the last call; when it exceeds the source
  * ring's capacity only the most recent survive, and the head still advances by
  * the full amount so the gap stays visible instead of being silently closed.
+ *
+ * The two source rings are read through a stride rather than through accessor
+ * callbacks so that this runs allocation-free on the step path: the GPU keeps
+ * interleaved `(slot, time)` pairs in one buffer (`stride` 2, `timeOffset` 1),
+ * the WASM core keeps two parallel columns (`stride` 1, `timeOffset` 0).
  */
 export function replaySpikeLog(
   log: SpikeLog,
   emitted: number,
   ringCapacity: number,
   ringTotal: number,
-  neuronAt: (slot: number) => number,
-  timeAt: (slot: number) => number,
+  neuronSource: Uint32Array,
+  timeSource: Float32Array,
+  stride: number,
+  timeOffset: number,
 ): void {
   if (emitted <= 0 || ringCapacity <= 0 || log.capacity <= 0) return;
   const available = Math.min(emitted, ringCapacity);
@@ -319,8 +326,8 @@ export function replaySpikeLog(
   for (let k = 0; k < available; k += 1) {
     const source = (first + k) % ringCapacity;
     const target = (base + k) % log.capacity;
-    log.neuron[target] = neuronAt(source);
-    log.time[target] = timeAt(source);
+    log.neuron[target] = neuronSource[source * stride];
+    log.time[target] = timeSource[source * stride + timeOffset];
   }
   log.head += emitted;
 }
@@ -418,6 +425,8 @@ interface Streams {
   readonly integrate: UniformStream;
   readonly capture: UniformStream;
   readonly stdp: UniformStream;
+  /** The five above, hoisted so the per-batch upload loop allocates nothing. */
+  readonly all: readonly UniformStream[];
 }
 
 /** Host staging for the interleaved GPU records, reused every step. */
@@ -576,7 +585,7 @@ export class GpuIntegrator implements Integrator {
       return { steps: 0, spikes: this.takeSpikes(), simMs: performance.now() - started };
     }
 
-    this.uploadPerStep(buffers, settings);
+    this.uploadPerStep(buffers);
 
     // Time advances per batch rather than once at the end, because the uniforms
     // of the next batch are written from it and would otherwise replay the
@@ -670,6 +679,29 @@ export class GpuIntegrator implements Integrator {
   }
 
   /**
+   * The longest conduction delay in the network, in ms.
+   *
+   * Scanning the whole delay column is O(synapses), so it runs only when the
+   * topology could have changed rather than on every step: at a hundred thousand
+   * synapses the unconditional scan cost more than the dispatch it sized.
+   */
+  private longestDelayOf(buffers: SimulationBuffers): number {
+    const { synapses } = buffers;
+    if (this.delayScanVersion === this.topologyVersion && this.delayScanCount === synapses.count) {
+      return this.longestDelay;
+    }
+    let longest = 0;
+    for (let s = 0; s < synapses.count; s += 1) {
+      const delay = synapses.delay[s];
+      if (Number.isFinite(delay) && delay > longest) longest = delay;
+    }
+    this.longestDelay = longest;
+    this.delayScanVersion = this.topologyVersion;
+    this.delayScanCount = synapses.count;
+    return longest;
+  }
+
+  /**
    * Columns the delay ring needs at the current timestep.
    *
    * One column per substep of the longest conduction delay present, plus two so
@@ -679,12 +711,7 @@ export class GpuIntegrator implements Integrator {
    */
   private requiredRingSlots(buffers: SimulationBuffers, dt: number): number {
     const { synapses } = buffers;
-    let longest = 0;
-    for (let s = 0; s < synapses.count; s += 1) {
-      const delay = synapses.delay[s];
-      if (Number.isFinite(delay) && delay > longest) longest = delay;
-    }
-    const needed = Math.ceil(longest / dt) + 2;
+    const needed = Math.ceil(this.longestDelayOf(buffers) / dt) + 2;
     const columnBytes = Math.max(1, synapses.count) * 4;
     const budget = Math.min(DELAY_RING_BYTE_BUDGET, this.device.limits.maxStorageBufferBindingSize);
     const affordable = Math.max(2, Math.floor(budget / columnBytes));
@@ -797,12 +824,18 @@ export class GpuIntegrator implements Integrator {
         stride,
       };
     };
+    const deliver = build('nf-uniform-deliver');
+    const propagate = build('nf-uniform-propagate');
+    const integrate = build('nf-uniform-integrate');
+    const capture = build('nf-uniform-capture');
+    const stdp = build('nf-uniform-stdp');
     return {
-      deliver: build('nf-uniform-deliver'),
-      propagate: build('nf-uniform-propagate'),
-      integrate: build('nf-uniform-integrate'),
-      capture: build('nf-uniform-capture'),
-      stdp: build('nf-uniform-stdp'),
+      deliver,
+      propagate,
+      integrate,
+      capture,
+      stdp,
+      all: [deliver, propagate, integrate, capture, stdp],
     };
   }
 
@@ -992,13 +1025,15 @@ export class GpuIntegrator implements Integrator {
    * Re-upload the columns the host rewrites between steps.
    *
    * `iExt` is rewritten by `applyStimuli` and by the poke tool every frame, so
-   * the whole static record goes up each step rather than being diffed. The
-   * noise column is pre-divided by sqrt(dt): the integrate kernel multiplies
-   * the amplitude by a unit normal directly, while the reference scales by
-   * 1/sqrt(dt) so the variance accumulated per millisecond does not depend on
-   * the timestep.
+   * the whole static record goes up each step rather than being diffed.
+   *
+   * The noise column travels as the raw per-neuron amplitude. The integrate
+   * kernel applies the 1/sqrt(dt) white-noise scaling itself — see
+   * `whiteNoiseScale` in `NEURON_INTEGRATE_WGSL` — exactly as the reference
+   * does, so pre-scaling it here would apply the factor twice and inflate every
+   * noise current by 1/sqrt(dt): a further 3.2x at the default dt = 0.1 ms.
    */
-  private uploadPerStep(buffers: SimulationBuffers, settings: SimulationSettings): void {
+  private uploadPerStep(buffers: SimulationBuffers): void {
     const storage = this.storage;
     const scratch = this.scratch;
     if (storage === null || scratch === null) return;
@@ -1006,7 +1041,6 @@ export class GpuIntegrator implements Integrator {
     const n = neurons.count;
     if (n === 0) return;
 
-    const noiseScale = 1 / Math.sqrt(settings.dt);
     const f32 = scratch.neuronStaticF32;
     const u32 = scratch.neuronStaticU32;
     for (let i = 0; i < n; i += 1) {
@@ -1014,7 +1048,7 @@ export class GpuIntegrator implements Integrator {
       u32[b] = packMeta(neurons.model[i], neurons.polarity[i], neurons.enabled[i], neurons.flags[i]);
       f32[b + 1] = finiteOr(neurons.iExt[i], 0);
       f32[b + 2] = finiteOr(neurons.bias[i], 0);
-      f32[b + 3] = Math.max(0, finiteOr(neurons.noise[i], 0)) * noiseScale;
+      f32[b + 3] = Math.max(0, finiteOr(neurons.noise[i], 0));
     }
     this.device.queue.writeBuffer(storage.neuronStatic, 0, f32, 0, n * NEURON_STATIC_WORDS);
   }
@@ -1169,7 +1203,9 @@ export class GpuIntegrator implements Integrator {
     const seed = settings.seed >>> 0;
     const gain = settings.gain;
     const invDt = 1 / dt;
-    const noiseScale = Math.max(0, settings.noise) / Math.sqrt(dt);
+    // Raw amplitude, not pre-scaled: the kernel adds this to the per-neuron
+    // column and applies 1/sqrt(dt) to the sum, as the reference does.
+    const globalNoise = Math.max(0, settings.noise);
     // rk2 and rk4 have no GPU counterpart. Exponential Euler is stabler and
     // cheaper than either at the timesteps this app runs, and it is what the
     // reference uses for every linear relaxation.
@@ -1202,7 +1238,7 @@ export class GpuIntegrator implements Integrator {
       const i = streams.integrate;
       i.f32[base] = dt;
       i.f32[base + 1] = time;
-      i.f32[base + 2] = noiseScale;
+      i.f32[base + 2] = globalNoise;
       i.f32[base + 3] = FLASH_TAU;
       i.f32[base + 4] = RATE_TAU;
       i.f32[base + 5] = CALCIUM_TAU;
@@ -1231,13 +1267,7 @@ export class GpuIntegrator implements Integrator {
 
     const queue = this.device.queue;
     const bytes = batch * this.uniformSlotBytes;
-    for (const stream of [
-      streams.deliver,
-      streams.propagate,
-      streams.integrate,
-      streams.capture,
-      streams.stdp,
-    ]) {
+    for (const stream of streams.all) {
       queue.writeBuffer(stream.gpu, 0, stream.f32.buffer, 0, bytes);
     }
   }
@@ -1282,14 +1312,7 @@ export class GpuIntegrator implements Integrator {
       const words = SPIKE_RING_CAPACITY * SPIKE_EVENT_WORDS;
       const events = new Uint32Array(range, layout.spikeEvent.offset, words);
       const times = new Float32Array(range, layout.spikeEvent.offset, words);
-      replaySpikeLog(
-        buffers.spikes,
-        emitted,
-        SPIKE_RING_CAPACITY,
-        ticket,
-        (index) => events[index * SPIKE_EVENT_WORDS],
-        (index) => times[index * SPIKE_EVENT_WORDS + 1],
-      );
+      replaySpikeLog(buffers.spikes, emitted, SPIKE_RING_CAPACITY, ticket, events, times, SPIKE_EVENT_WORDS, 1);
     }
 
     const n = Math.min(slot.neurons, neurons.count);
@@ -1377,7 +1400,7 @@ export class GpuIntegrator implements Integrator {
     }
     const streams = this.streams;
     if (streams !== null) {
-      for (const stream of Object.values(streams)) stream.gpu.destroy();
+      for (const stream of streams.all) stream.gpu.destroy();
     }
     this.storage = null;
     this.streams = null;

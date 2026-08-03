@@ -223,6 +223,15 @@ export class PromptScan {
     return index >= 0 && index < this.claimed.length && this.claimed[index];
   }
 
+  /** True when any token overlapping the character range has already been claimed. */
+  isRangeClaimed(start: number, end: number): boolean {
+    for (let i = 0; i < this.tokens.length; i += 1) {
+      const token = this.tokens[i];
+      if (token.end > start && token.start < end && this.claimed[i]) return true;
+    }
+    return false;
+  }
+
   /** Index of the first occurrence of `word`, or -1. */
   indexOf(word: string, from = 0): number {
     for (let i = Math.max(0, from); i < this.tokens.length; i += 1) {

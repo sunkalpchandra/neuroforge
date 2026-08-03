@@ -398,13 +398,13 @@ async function describeHttpError(
   provider: AiProvider,
   viaProxy: boolean,
 ): Promise<string> {
-  let detail = '';
+  let body: string;
   try {
-    detail = (await response.text()).slice(0, MAX_ERROR_BODY_CHARS).trim();
+    body = (await response.text()).slice(0, MAX_ERROR_BODY_CHARS).trim();
   } catch {
-    detail = '';
+    body = '';
   }
-  const parsedDetail = extractDetail(detail);
+  const parsedDetail = extractDetail(body);
   const origin = viaProxy ? 'The planning proxy' : provider === 'openai' ? 'OpenAI' : 'Anthropic';
   const suffix = parsedDetail === '' ? '' : ` — ${parsedDetail}`;
 

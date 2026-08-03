@@ -2,8 +2,8 @@
  * Copy-on-write drafting of a Circuit.
  *
  * Every mutation of the document goes through `runDraft`. The draft handed to
- * the mutator is a Proxy: reads are transparent, and the first write to any path
- * shallow-copies each node along that path before touching it. Nothing that was
+ * the mutator is a Proxy: reads are transparent, and the first write to any node
+ * shallow-copies that node and each of its ancestors before touching it. Nothing
  * already in the document is ever mutated in place, so the previous Circuit
  * stays a valid, complete value and can be handed back by undo without having
  * been cloned.
@@ -13,11 +13,16 @@
  * references as its before/after values instead of deep clones. It holds because
  * this package is the only writer of the document, and this file is the only
  * writer inside this package.
+ *
+ * Proxies are bound to the object they were created from, not to the position
+ * that object occupied. That distinction matters: `synapses.sort(...)` moves
+ * every element, and a proxy that meant "whatever is at index 4" would silently
+ * start standing for a different synapse halfway through the operation.
  */
 
 import type { Circuit } from '@neuroforge/shared';
 
-/** Marker read off a proxy to recover the object it currently stands for. */
+/** Marker read off a proxy to recover the object it stands for. */
 const RAW = Symbol('neuroforge.editor.raw');
 
 type Node = Record<string, unknown>;
@@ -95,10 +100,6 @@ function isContainer(value: unknown): value is Node {
   return typeof value === 'object' && value !== null;
 }
 
-function isPlainObject(value: unknown): value is Node {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function shallowCopy(value: Node): Node {
   return Array.isArray(value) ? (value.slice() as unknown as Node) : { ...value };
 }
@@ -107,67 +108,177 @@ function readKey(node: Node, key: string | symbol): unknown {
   return (node as unknown as Record<string | symbol, unknown>)[key];
 }
 
-function writeKey(node: Node, key: string, value: unknown): void {
-  node[key] = value;
+/* --------------------------------------------------------------- drafting -- */
+
+/**
+ * One node of the document as the draft sees it: the object it was found as,
+ * the writable copy once one exists, and where it lives so that copy can be put
+ * back.
+ */
+interface Slot {
+  readonly origin: Node;
+  copy: Node | null;
+  /** Null for the document root. */
+  owner: Slot | null;
+  /** Property name or array index under `owner`. */
+  key: string;
+  /** Top-level document field this slot sits under; null for the root. */
+  rootKey: string | null;
+  proxy: object | null;
 }
 
-function resolve(root: Node, path: readonly string[]): Node {
-  let node = root;
-  for (let i = 0; i < path.length; i += 1) {
-    node = node[path[i]] as Node;
+class Draft {
+  readonly root: Slot;
+  /** Filed under both the original object and its copy. */
+  private readonly slots = new Map<Node, Slot>();
+  /** Top-level document keys that were written. */
+  readonly touched = new Set<string>();
+
+  constructor(base: Node) {
+    this.root = { origin: base, copy: null, owner: null, key: '', rootKey: null, proxy: null };
+    this.slots.set(base, this.root);
   }
-  return node;
-}
 
-function pathKey(path: readonly string[], key?: string): string {
-  const joined = path.join('.');
-  if (key === undefined) return joined;
-  return joined.length === 0 ? key : `${joined}.${key}`;
-}
+  get result(): Node {
+    return this.root.copy ?? this.root.origin;
+  }
 
-/* ----------------------------------------------------------------- proxies -- */
+  get changed(): boolean {
+    return this.root.copy !== null;
+  }
 
-interface Handle {
-  /** The published document, never written. */
-  readonly pristine: Node;
-  /** The working value; identical to `pristine` until the first write. */
-  current: Node;
-  /** Dot-joined paths already copied for writing; `''` is the root. */
-  readonly copied: Set<string>;
-  readonly proxies: Map<string, object>;
+  current(slot: Slot): Node {
+    return slot.copy ?? slot.origin;
+  }
+
+  /** The slot for a child node, creating or relocating it as needed. */
+  child(owner: Slot, key: string, value: Node): Slot {
+    const existing = this.slots.get(value);
+    if (existing !== undefined) {
+      // Once copied, a slot is already attached where it belongs. Before that,
+      // the newest sighting wins, which is what keeps an object that was moved
+      // or shared between two parents attached to the right one.
+      if (existing.copy === null && existing.origin === value) {
+        existing.owner = owner;
+        existing.key = key;
+        existing.rootKey = owner.owner === null ? key : owner.rootKey;
+      }
+      return existing;
+    }
+    const slot: Slot = {
+      origin: value,
+      copy: null,
+      owner,
+      key,
+      rootKey: owner.owner === null ? key : owner.rootKey,
+      proxy: null,
+    };
+    this.slots.set(value, slot);
+    return slot;
+  }
+
+  /** Copy this slot and every ancestor that is still shared, and return it. */
+  writable(slot: Slot): Node {
+    if (slot.copy !== null) return slot.copy;
+    const copy = shallowCopy(slot.origin);
+    slot.copy = copy;
+    this.slots.set(copy, slot);
+    if (slot.owner !== null) {
+      attach(this.writable(slot.owner), slot.key, slot.origin, copy);
+    }
+    return copy;
+  }
+
+  markTouched(slot: Slot, key: string): void {
+    this.touched.add(slot.owner === null ? key : (slot.rootKey ?? key));
+  }
+
+  proxy(slot: Slot): object {
+    if (slot.proxy !== null) return slot.proxy;
+
+    const handler: ProxyHandler<Node> = {
+      get: (_target, key, receiver: object) => {
+        if (key === RAW) return this.current(slot);
+        const node = this.current(slot);
+        const value = readKey(node, key);
+        if (typeof value === 'function') {
+          // Bound to the proxy rather than the node, so array methods read and
+          // write through these traps and copy on write like everything else.
+          return (value as (...args: unknown[]) => unknown).bind(receiver);
+        }
+        if (isContainer(value) && typeof key === 'string') {
+          return this.proxy(this.child(slot, key, value));
+        }
+        return value;
+      },
+
+      set: (_target, key, value) => {
+        if (typeof key !== 'string') return false;
+        this.writable(slot)[key] = detach(value);
+        this.markTouched(slot, key);
+        return true;
+      },
+
+      defineProperty: (_target, key, descriptor) => {
+        if (typeof key !== 'string') return false;
+        const next =
+          'value' in descriptor ? { ...descriptor, value: detach(descriptor.value) } : descriptor;
+        Reflect.defineProperty(this.writable(slot), key, next);
+        this.markTouched(slot, key);
+        return true;
+      },
+
+      deleteProperty: (_target, key) => {
+        if (typeof key !== 'string') return false;
+        delete this.writable(slot)[key];
+        this.markTouched(slot, key);
+        return true;
+      },
+
+      has: (_target, key) => key in this.current(slot),
+
+      ownKeys: () => Reflect.ownKeys(this.current(slot)),
+
+      getOwnPropertyDescriptor: (target, key) => {
+        const descriptor = Reflect.getOwnPropertyDescriptor(this.current(slot), key);
+        if (descriptor === undefined) return undefined;
+        // A non-configurable key on the fixed target (an array's `length`) has
+        // to be reported exactly as the target holds it, or the proxy
+        // invariant check throws.
+        const own = Reflect.getOwnPropertyDescriptor(target, key);
+        if (own !== undefined && own.configurable === false) return own;
+        return { ...descriptor, configurable: true };
+      },
+    };
+
+    const proxy = new Proxy(slot.origin, handler);
+    slot.proxy = proxy;
+    return proxy;
+  }
 }
 
 /**
- * Copy every node from the root down to `path` that is still shared with the
- * published document, and return the writable node at the end of the path.
+ * Put a freshly made copy back where its original sat. The recorded key is
+ * right except after a reordering, in which case the original is looked up by
+ * identity; an original that is simply gone needs no reattachment.
  */
-function ensurePath(handle: Handle, path: readonly string[]): Node {
-  if (!handle.copied.has('')) {
-    handle.current = shallowCopy(handle.pristine);
-    handle.copied.add('');
+function attach(owner: Node, key: string, origin: Node, copy: Node): void {
+  const held = owner[key];
+  if (held === origin || held === copy) {
+    owner[key] = copy;
+    return;
   }
-  let node = handle.current;
-  let key = '';
-  for (let i = 0; i < path.length; i += 1) {
-    const segment = path[i];
-    key = key.length === 0 ? segment : `${key}.${segment}`;
-    const child = node[segment];
-    if (!isContainer(child)) return node;
-    if (!handle.copied.has(key)) {
-      const copy = shallowCopy(child);
-      node[segment] = copy;
-      handle.copied.add(key);
-      node = copy;
-    } else {
-      node = child;
-    }
+  if (Array.isArray(owner)) {
+    const index = (owner as unknown as unknown[]).indexOf(origin);
+    if (index >= 0) (owner as unknown as unknown[])[index] = copy;
+    return;
   }
-  return node;
+  owner[key] = copy;
 }
 
 /**
  * Strip draft proxies out of a value on its way into the document, so a
- * reference captured from the draft can never end up stored inside it.
+ * reference read out of the draft can never end up stored inside it.
  */
 function detach(value: unknown): unknown {
   if (!isContainer(value)) return value;
@@ -186,7 +297,6 @@ function detach(value: unknown): unknown {
     return changed ? out : value;
   }
 
-  if (!isPlainObject(value)) return value;
   let changed = false;
   const out: Node = {};
   for (const key of Object.keys(value)) {
@@ -196,77 +306,6 @@ function detach(value: unknown): unknown {
     out[key] = clean;
   }
   return changed ? out : value;
-}
-
-function proxyFor(handle: Handle, path: readonly string[]): object {
-  const cacheKey = pathKey(path);
-  const cached = handle.proxies.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const target = resolve(handle.current, path);
-
-  const handler: ProxyHandler<Node> = {
-    get(_target, key, receiver: object) {
-      if (key === RAW) return resolve(handle.current, path);
-      const node = resolve(handle.current, path);
-      const value = readKey(node, key);
-      if (typeof value === 'function') {
-        // Bound to the proxy, not the node, so array methods read and write
-        // through these traps and therefore copy on write like everything else.
-        return (value as (...args: unknown[]) => unknown).bind(receiver);
-      }
-      if (isContainer(value) && typeof key === 'string') return proxyFor(handle, [...path, key]);
-      return value;
-    },
-
-    set(_target, key, value) {
-      if (typeof key !== 'string') return false;
-      const node = ensurePath(handle, path);
-      writeKey(node, key, detach(value));
-      handle.copied.add(pathKey(path, key));
-      return true;
-    },
-
-    defineProperty(_target, key, descriptor) {
-      if (typeof key !== 'string') return false;
-      const node = ensurePath(handle, path);
-      const next =
-        'value' in descriptor ? { ...descriptor, value: detach(descriptor.value) } : descriptor;
-      Reflect.defineProperty(node, key, next);
-      handle.copied.add(pathKey(path, key));
-      return true;
-    },
-
-    deleteProperty(_target, key) {
-      if (typeof key !== 'string') return false;
-      const node = ensurePath(handle, path);
-      delete node[key];
-      handle.copied.add(pathKey(path, key));
-      return true;
-    },
-
-    has(_target, key) {
-      return key in resolve(handle.current, path);
-    },
-
-    ownKeys() {
-      return Reflect.ownKeys(resolve(handle.current, path));
-    },
-
-    getOwnPropertyDescriptor(fixed, key) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(resolve(handle.current, path), key);
-      if (descriptor === undefined) return undefined;
-      // A non-configurable key on the target (an array's `length`) must be
-      // reported exactly as the target has it or the proxy invariant trips.
-      const own = Reflect.getOwnPropertyDescriptor(fixed, key);
-      if (own !== undefined && own.configurable === false) return own;
-      return { ...descriptor, configurable: true };
-    },
-  };
-
-  const proxy = new Proxy(target, handler);
-  handle.proxies.set(cacheKey, proxy);
-  return proxy;
 }
 
 /* -------------------------------------------------------------------- diff -- */
@@ -338,17 +377,6 @@ function extractDiff(before: Node, after: Node, touched: ReadonlySet<string>): C
   return { collections, fields };
 }
 
-/** First path segment of every write performed during a session. */
-function touchedRoots(handle: Handle): Set<string> {
-  const roots = new Set<string>();
-  for (const key of handle.copied) {
-    if (key.length === 0) continue;
-    const dot = key.indexOf('.');
-    roots.add(dot === -1 ? key : key.slice(0, dot));
-  }
-  return roots;
-}
-
 export interface DraftResult {
   readonly circuit: Circuit;
   /** Null when the session was not asked to track, empty when nothing changed. */
@@ -359,8 +387,7 @@ export interface DraftResult {
  * Run `mutate` against a copy-on-write draft of `base`.
  *
  * If `mutate` throws, `base` is left untouched — every write landed in a private
- * copy that is simply discarded — so a failed edit can never corrupt the
- * document.
+ * copy that is simply discarded — so a failed edit cannot corrupt the document.
  */
 export function runDraft(
   base: Circuit,
@@ -368,25 +395,20 @@ export function runDraft(
   track: boolean,
 ): DraftResult {
   const root = base as unknown as Node;
-  const handle: Handle = {
-    pristine: root,
-    current: root,
-    copied: new Set<string>(),
-    proxies: new Map<string, object>(),
-  };
+  const draft = new Draft(root);
 
-  mutate(proxyFor(handle, []) as unknown as Circuit);
+  mutate(draft.proxy(draft.root) as unknown as Circuit);
 
-  if (handle.copied.size === 0) {
+  if (!draft.changed) {
     return { circuit: base, diff: track ? EMPTY_DIFF : null };
   }
 
-  const next = handle.current as unknown as Circuit;
-  const diff = track ? extractDiff(root, handle.current, touchedRoots(handle)) : null;
-  if (track && diff !== null && isEmptyDiff(diff)) {
-    return { circuit: base, diff: EMPTY_DIFF };
-  }
-  return { circuit: next, diff };
+  const next = draft.result;
+  if (!track) return { circuit: next as unknown as Circuit, diff: null };
+
+  const diff = extractDiff(root, next, draft.touched);
+  if (isEmptyDiff(diff)) return { circuit: base, diff: EMPTY_DIFF };
+  return { circuit: next as unknown as Circuit, diff };
 }
 
 /* ------------------------------------------------------------- diff replay -- */
@@ -464,15 +486,15 @@ export function mergeDiff(first: CircuitDiff, second: CircuitDiff): CircuitDiff 
       );
     }
 
-    // Whichever diff did not move the collection leaves the other's ordering as
-    // the net ordering, because it observed and preserved it.
+    // Whichever diff left the ordering alone observed and preserved the other's,
+    // so the surviving pair of orders is the net one.
     let order: CollectionChange['order'] = null;
-    if (prior.order !== null || change.order !== null) {
-      order = {
-        before: prior.order !== null ? prior.order.before : (change.order as NonNullable<CollectionChange['order']>).before,
-        after: change.order !== null ? change.order.after : (prior.order as NonNullable<CollectionChange['order']>).after,
-      };
-      if (sameOrder(order.before, order.after)) order = null;
+    const priorOrder = prior.order;
+    const changeOrder = change.order;
+    if (priorOrder !== null || changeOrder !== null) {
+      const beforeOrder = priorOrder !== null ? priorOrder.before : (changeOrder as NonNullable<typeof changeOrder>).before;
+      const afterOrder = changeOrder !== null ? changeOrder.after : (priorOrder as NonNullable<typeof priorOrder>).after;
+      order = sameOrder(beforeOrder, afterOrder) ? null : { before: beforeOrder, after: afterOrder };
     }
 
     const merged: EntityChange[] = [];
