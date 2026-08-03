@@ -7,11 +7,13 @@ import { Autosaver } from '@neuroforge/io';
 import type { NeuronId } from '@neuroforge/shared';
 
 import { AiBuilder } from './builder/ai-builder';
+import { SelectionList } from './selection-list';
+import { ViewControls } from './view-controls';
 import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
 import { Viewport } from './viewport';
-import { getEngine } from '@/lib/runtime';
+import { getEngine, syncSelectionFlags } from '@/lib/runtime';
 
 /** Match a KeyboardEvent against a shortcut descriptor like "Mod+Shift+Z". */
 function matches(event: KeyboardEvent, keys: string): boolean {
@@ -49,6 +51,8 @@ export function Workspace() {
   const circuit = useEditor((s) => s.circuit);
   const select = useEditor((s) => s.select);
   const clearSelection = useEditor((s) => s.clearSelection);
+  const selection = useEditor((s) => s.selection);
+  const hovered = useEditor((s) => s.hovered);
 
   // The renderer works in dense slots; the document works in ids. The engine
   // owns the mapping, so translation happens here rather than in either of them.
@@ -70,7 +74,13 @@ export function Workspace() {
   useEffect(() => {
     getEngine().load(circuit);
     getEngine().play();
-  }, [circuit.neurons, circuit.synapses, circuit.id]);
+    // load() zeroes the flag column, so the selection has to be republished.
+    syncSelectionFlags(selection, hovered);
+  }, [circuit.neurons, circuit.synapses, circuit.id, selection, hovered]);
+
+  useEffect(() => {
+    syncSelectionFlags(selection, hovered);
+  }, [selection, hovered]);
 
   useEffect(() => {
     const shortcuts = buildShortcuts();
@@ -121,6 +131,8 @@ export function Workspace() {
         <div className="pointer-events-none absolute inset-0">
           <AiBuilder />
           <Inspector />
+          <ViewControls />
+          <SelectionList />
         </div>
       </main>
       <StatusBar />

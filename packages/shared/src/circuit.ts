@@ -9,6 +9,7 @@ import type {
 import type { Morphology, Neuron, NeuronParams, NeuronPolarity } from './neuron';
 import type { ConnectivityRule, Synapse } from './synapse';
 import type { Vec3 } from './geometry';
+import type { ColorMode } from './theme';
 
 /** Spatial arrangement used when a population is instantiated. */
 export type PopulationLayout =
@@ -154,6 +155,12 @@ export interface RenderSettings {
   neuronScale: number;
   /** Renders voltage as a colour ramp rather than a flat accent. */
   voltageColoring: boolean;
+  /** How neurons are tinted. See ColorMode in theme.ts. */
+  colorMode: ColorMode;
+  /** Opacity of unselected cells once a selection exists, 0..1. */
+  dimUnselected: number;
+  /** Global saturation multiplier applied to cell tints. */
+  saturation: number;
 }
 
 export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
@@ -177,7 +184,10 @@ export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
   showParticles: true,
   particleDensity: 1,
   neuronScale: 1,
-  voltageColoring: true,
+  voltageColoring: false,
+  colorMode: 'identity',
+  dimUnselected: 0.18,
+  saturation: 1,
 };
 
 /**

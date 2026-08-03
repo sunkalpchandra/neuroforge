@@ -1,7 +1,7 @@
 import { ProbeRecorder, SimulationEngine } from '@neuroforge/simulation';
 import { ForceLayout } from '@neuroforge/physics';
 import type { FrameStats } from '@neuroforge/shared';
-import { EMPTY_FRAME_STATS } from '@neuroforge/shared';
+import { EMPTY_FRAME_STATS, NEURON_FLAG } from '@neuroforge/shared';
 
 /**
  * The long-lived, non-React runtime.
@@ -34,6 +34,40 @@ export function getProbes(): ProbeRecorder {
 export function getLayout(): ForceLayout {
   if (layout === null) layout = new ForceLayout();
   return layout;
+}
+
+/**
+ * Publish the editor's selection into the simulation buffers.
+ *
+ * The document tracks selection as ids; the renderer reads a per-neuron flag
+ * bitfield, because a shader cannot look anything up in a Set. Nothing bridged
+ * the two, so the selection halo and the dimming of unselected cells had no
+ * input and never engaged. This is that bridge, called whenever the selection
+ * changes rather than per frame.
+ */
+export function syncSelectionFlags(
+  selection: readonly string[],
+  hovered: string | null,
+): void {
+  const engine = getEngine();
+  const { neurons } = engine.buffers;
+  const count = neurons.count;
+  if (count === 0) return;
+
+  // Clearing only the bits this function owns leaves PROBED and GHOSTED, which
+  // are set elsewhere, intact.
+  const KEEP = ~(NEURON_FLAG.SELECTED | NEURON_FLAG.HOVERED);
+  for (let i = 0; i < count; i += 1) neurons.flags[i] &= KEEP;
+
+  for (const id of selection) {
+    const slot = engine.slotOf(id);
+    if (slot >= 0 && slot < count) neurons.flags[slot] |= NEURON_FLAG.SELECTED;
+  }
+
+  if (hovered !== null) {
+    const slot = engine.slotOf(hovered);
+    if (slot >= 0 && slot < count) neurons.flags[slot] |= NEURON_FLAG.HOVERED;
+  }
 }
 
 /* ------------------------------------------------------------------ stats -- */

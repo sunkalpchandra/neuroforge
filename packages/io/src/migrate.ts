@@ -28,6 +28,7 @@ import {
   RECEPTOR_KINDS,
   defaultMorphology,
   newCircuitId,
+  COLOR_MODES,
 } from '@neuroforge/shared';
 import type {
   AdExParams,
@@ -952,6 +953,15 @@ function readRender(report: Report, value: unknown, path: string): RenderSetting
     particleDensity: num(report, value.particleDensity, `${path}.particleDensity`, d.particleDensity, { min: 0 }),
     neuronScale: num(report, value.neuronScale, `${path}.neuronScale`, d.neuronScale, { min: 1e-3 }),
     voltageColoring: bool(report, value.voltageColoring, `${path}.voltageColoring`, d.voltageColoring),
+    // Documents written before cell-identity colouring existed carry none of
+    // these; falling back to the defaults is the migration, and silently, since
+    // an absent field here is expected rather than a defect in the file.
+    colorMode: enumOf(report, value.colorMode, `${path}.colorMode`, COLOR_MODES, d.colorMode),
+    dimUnselected: num(report, value.dimUnselected, `${path}.dimUnselected`, d.dimUnselected, {
+      min: 0,
+      max: 1,
+    }),
+    saturation: num(report, value.saturation, `${path}.saturation`, d.saturation, { min: 0, max: 2 }),
   };
 }
 

@@ -158,7 +158,7 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
       <directionalLight position={[-50, -20, -40]} intensity={0.5} color={COLORS.secondary} />
       <hemisphereLight args={[COLORS.accent, COLORS.background, 0.35]} />
 
-      <fogExp2 attach="fog" args={[COLORS.background, settings.fogDensity]} />
+      <fogExp2 attach="fog" args={[COLORS.scene, settings.fogDensity]} />
 
       {settings.gridVisible ? <primitive object={fields.grid} /> : null}
       <primitive object={fields.neurons} />
@@ -256,9 +256,9 @@ export function Viewport({ render = DEFAULT_RENDER_SETTINGS, onPick }: ViewportP
       }}
       camera={{ position: [0, 34, 96], fov: 42, near: 0.1, far: 4000 }}
       onCreated={({ gl, scene }) => {
-        gl.setClearColor(COLORS.background, 1);
+        gl.setClearColor(COLORS.scene, 1);
         gl.toneMappingExposure = render.exposure;
-        scene.background = new THREE.Color(COLORS.background);
+        scene.background = new THREE.Color(COLORS.scene);
       }}
     >
       <Scene settings={render} onPick={onPick} />

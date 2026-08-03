@@ -5,8 +5,11 @@ import {
   DEFAULT_RENDER_SETTINGS,
   NEURON_FLAG,
   POLARITY_COLORS,
+  hslToRgb,
+  identityColor,
+  srgbToLinear,
 } from '@neuroforge/shared';
-import type { RenderSettings, SimulationBuffers } from '@neuroforge/shared';
+import type { ColorMode, RenderSettings, SimulationBuffers } from '@neuroforge/shared';
 import { SpatialHash } from '@neuroforge/math';
 import { linearColor } from './palette';
 import type { GlyphLibrary } from './glyph-library';
@@ -41,6 +44,114 @@ const HASH_INTERVAL = 0.25;
 /** Cell size relative to the largest soma; wide enough that a walk is short. */
 const HASH_CELL_FACTOR = 6;
 
+
+/**
+ * Neurotransmitter tints, keyed by polarity. Excitatory cells in an insect brain
+ * are overwhelmingly cholinergic and inhibitory ones GABAergic, so polarity is
+ * the honest proxy here — the document does not carry a transmitter field.
+ */
+const TRANSMITTER_TINT: readonly (readonly [number, number, number])[] = [
+  srgbToLinear('#F5A524'),
+  srgbToLinear('#5B8DEF'),
+];
+
+const POLARITY_TINT: readonly (readonly [number, number, number])[] = [
+  srgbToLinear(POLARITY_COLORS.excitatory),
+  srgbToLinear(POLARITY_COLORS.inhibitory),
+];
+
+/** Reusable scratch so the per-instance path allocates nothing. */
+const TINT_SCRATCH: [number, number, number] = [0, 0, 0];
+
+function rampTint(value: number, out: [number, number, number]): void {
+  // Cool-to-hot through the accent hues, matching the voltage ramp's endpoints
+  // without paying for a full gradient lookup per instance.
+  const t = value < 0 ? 0 : value > 1 ? 1 : value;
+  const rgb = hslToRgb(0.62 - 0.62 * t, 0.85, 0.42 + 0.22 * t);
+  out[0] = rgb[0];
+  out[1] = rgb[1];
+  out[2] = rgb[2];
+}
+
+/**
+ * Write one cell's tint in linear space.
+ *
+ * `identity` is the mode that makes a dense field readable: the hue comes from
+ * the neuron's own procedural seed, so a cell keeps its colour across reloads,
+ * across layout changes, and between the scene and the chrome's swatches.
+ */
+function writeTint(
+  out: Float32Array,
+  at: number,
+  mode: ColorMode,
+  neurons: SimulationBuffers['neurons'],
+  slot: number,
+): void {
+  switch (mode) {
+    case 'identity': {
+      const rgb = identityColor(neurons.seed[slot]);
+      out[at] = srgbChannelToLinear(rgb[0]);
+      out[at + 1] = srgbChannelToLinear(rgb[1]);
+      out[at + 2] = srgbChannelToLinear(rgb[2]);
+      return;
+    }
+    case 'population': {
+      const population = neurons.population[slot];
+      // Unassigned cells stay neutral so grouped ones stand out against them.
+      if (population === 0xffff) {
+        out[at] = 0.20;
+        out[at + 1] = 0.22;
+        out[at + 2] = 0.25;
+        return;
+      }
+      // Offset keeps population hues from colliding with the identity sequence.
+      const rgb = identityColor(population * 2654435761 + 0x9e37);
+      out[at] = srgbChannelToLinear(rgb[0]);
+      out[at + 1] = srgbChannelToLinear(rgb[1]);
+      out[at + 2] = srgbChannelToLinear(rgb[2]);
+      return;
+    }
+    case 'receptor': {
+      const tint = TRANSMITTER_TINT[neurons.polarity[slot] === 1 ? 1 : 0];
+      out[at] = tint[0];
+      out[at + 1] = tint[1];
+      out[at + 2] = tint[2];
+      return;
+    }
+    case 'polarity': {
+      const tint = POLARITY_TINT[neurons.polarity[slot] === 1 ? 1 : 0];
+      out[at] = tint[0];
+      out[at + 1] = tint[1];
+      out[at + 2] = tint[2];
+      return;
+    }
+    case 'voltage': {
+      rampTint((neurons.v[slot] + 80) / 110, TINT_SCRATCH);
+      out[at] = srgbChannelToLinear(TINT_SCRATCH[0]);
+      out[at + 1] = srgbChannelToLinear(TINT_SCRATCH[1]);
+      out[at + 2] = srgbChannelToLinear(TINT_SCRATCH[2]);
+      return;
+    }
+    case 'rate': {
+      rampTint(neurons.rate[slot] / 80, TINT_SCRATCH);
+      out[at] = srgbChannelToLinear(TINT_SCRATCH[0]);
+      out[at + 1] = srgbChannelToLinear(TINT_SCRATCH[1]);
+      out[at + 2] = srgbChannelToLinear(TINT_SCRATCH[2]);
+      return;
+    }
+    default: {
+      out[at] = 1;
+      out[at + 1] = 1;
+      out[at + 2] = 1;
+    }
+  }
+}
+
+/** Single-channel sRGB to linear; the triple form lives in shared/theme. */
+function srgbChannelToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
 interface InstancePool {
   offset: THREE.InstancedBufferAttribute;
   scale: THREE.InstancedBufferAttribute;
@@ -48,6 +159,7 @@ interface InstancePool {
   flash: THREE.InstancedBufferAttribute;
   polarity: THREE.InstancedBufferAttribute;
   flags: THREE.InstancedBufferAttribute;
+  tint: THREE.InstancedBufferAttribute;
 }
 
 interface FieldGroup {
@@ -68,6 +180,7 @@ function createPool(capacity: number): InstancePool {
     flash: instancedAttribute(capacity, 1),
     polarity: instancedAttribute(capacity, 1),
     flags: instancedAttribute(capacity, 1),
+    tint: instancedAttribute(capacity, 3),
   };
 }
 
@@ -78,6 +191,7 @@ function bindPool(geometry: THREE.InstancedBufferGeometry, pool: InstancePool): 
   geometry.setAttribute('instanceFlash', pool.flash);
   geometry.setAttribute('instancePolarity', pool.polarity);
   geometry.setAttribute('instanceFlags', pool.flags);
+  geometry.setAttribute('instanceTint', pool.tint);
 }
 
 type PartStyle = {
@@ -125,6 +239,9 @@ function createMaterial(part: number): THREE.ShaderMaterial {
       uOpacity: { value: style.opacity },
       uGhostOpacity: { value: 0.16 },
       uVoltageColoring: { value: DEFAULT_RENDER_SETTINGS.voltageColoring ? 1 : 0 },
+      uSaturation: { value: DEFAULT_RENDER_SETTINGS.saturation },
+      uDimUnselected: { value: DEFAULT_RENDER_SETTINGS.dimUnselected },
+      uHasSelection: { value: 0 },
       uTranslucency: { value: style.translucency },
       uFogDensity: { value: DEFAULT_RENDER_SETTINGS.fogDensity },
     },
@@ -151,6 +268,9 @@ export class NeuronField extends THREE.Group {
   #neuronCount = 0;
   #pickRadius = 1;
   #neuronScale = DEFAULT_RENDER_SETTINGS.neuronScale;
+  /** Last mode seen by update(); a rebuild can happen before the first frame. */
+  #colorMode: ColorMode = DEFAULT_RENDER_SETTINGS.colorMode;
+  #hasSelection = false;
 
   constructor(library: GlyphLibrary) {
     super();
@@ -220,17 +340,34 @@ export class NeuronField extends THREE.Group {
     this.#positions = neurons.position;
     this.#neuronCount = count;
     this.#refreshHash();
-    this.#writeInstances(buffers, 0);
+    this.#writeInstances(buffers, 0, this.#colorMode);
   }
 
   /** Per-frame attribute refresh. Touches no allocator and no geometry. */
   update(buffers: SimulationBuffers, dt: number, settings: RenderSettings): void {
+    // Whether anything is selected drives the dimming of everything else, so it
+    // is answered once per frame with an early exit rather than per instance.
+    const flagColumn = buffers.neurons.flags;
+    const neuronTotal = buffers.neurons.count;
+    let anySelected = false;
+    for (let i = 0; i < neuronTotal; i += 1) {
+      if ((flagColumn[i] & NEURON_FLAG.SELECTED) !== 0) {
+        anySelected = true;
+        break;
+      }
+    }
+    this.#hasSelection = anySelected;
+
     this.#neuronScale = settings.neuronScale;
+    this.#colorMode = settings.colorMode;
     for (let part = 0; part < PART_COUNT; part += 1) {
       const uniforms = this.#materials[part].uniforms;
       uniforms.uNeuronScale.value = settings.neuronScale;
       uniforms.uVoltageColoring.value = settings.voltageColoring ? 1 : 0;
       uniforms.uFogDensity.value = settings.fogDensity;
+      uniforms.uSaturation.value = settings.saturation;
+      uniforms.uDimUnselected.value = settings.dimUnselected;
+      uniforms.uHasSelection.value = this.#hasSelection ? 1 : 0;
     }
 
     for (let g = 0; g < this.#order.length; g += 1) {
@@ -239,7 +376,7 @@ export class NeuronField extends THREE.Group {
       meshes[PART_AXON].visible = settings.showAxons;
     }
 
-    this.#writeInstances(buffers, dt);
+    this.#writeInstances(buffers, dt, settings.colorMode);
 
     this.#hashAge += dt;
     if (this.#hashAge >= HASH_INTERVAL) {
@@ -276,7 +413,7 @@ export class NeuronField extends THREE.Group {
     this.#positions = null;
   }
 
-  #writeInstances(buffers: SimulationBuffers, dt: number): void {
+  #writeInstances(buffers: SimulationBuffers, dt: number, mode: ColorMode): void {
     const neurons = buffers.neurons;
     const position = neurons.position;
     const scaleColumn = neurons.scale;
@@ -299,6 +436,7 @@ export class NeuronField extends THREE.Group {
       const flashArray = group.pool.flash.array as Float32Array;
       const polarityArray = group.pool.polarity.array as Float32Array;
       const flagsArray = group.pool.flags.array as Float32Array;
+      const tintArray = group.pool.tint.array as Float32Array;
 
       for (let i = 0; i < total; i += 1) {
         const slot = slots[i];
@@ -320,6 +458,9 @@ export class NeuronField extends THREE.Group {
         // A disabled neuron is still drawn, dimmed, which is exactly what the
         // ghost bit means to the fragment program.
         flagsArray[i] = enabled[slot] === 0 ? flags[slot] | NEURON_FLAG.GHOSTED : flags[slot];
+
+        const t = i * 3;
+        writeTint(tintArray, t, mode, neurons, slot);
       }
 
       group.pool.offset.needsUpdate = true;
@@ -328,6 +469,7 @@ export class NeuronField extends THREE.Group {
       group.pool.flash.needsUpdate = true;
       group.pool.polarity.needsUpdate = true;
       group.pool.flags.needsUpdate = true;
+      group.pool.tint.needsUpdate = true;
       for (let part = 0; part < PART_COUNT; part += 1) {
         group.geometries[part].instanceCount = total;
       }

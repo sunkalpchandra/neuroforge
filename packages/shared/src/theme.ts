@@ -6,6 +6,12 @@
 
 export const COLORS = {
   background: '#07090B',
+  /**
+   * The 3D viewport clears to true black rather than to the chrome background.
+   * Saturated cell colours need the full dynamic range beneath them to read as
+   * emissive, and any lift in the clear colour greys the whole connectome.
+   */
+  scene: '#000000',
   panel: '#101418',
   panelRaised: '#151A20',
   border: 'rgba(255,255,255,0.05)',
@@ -25,6 +31,7 @@ export type ColorToken = keyof typeof COLORS;
 /** Linear-space RGB triples for the renderer, derived from COLORS. */
 export const COLOR_RGB: Record<ColorToken, readonly [number, number, number]> = {
   background: srgbToLinear('#07090B'),
+  scene: srgbToLinear('#000000'),
   panel: srgbToLinear('#101418'),
   panelRaised: srgbToLinear('#151A20'),
   border: [1, 1, 1],
@@ -116,6 +123,101 @@ export const POLARITY_COLORS = {
   excitatory: '#4FD1FF',
   inhibitory: '#B66BFF',
 } as const;
+
+/**
+ * How the scene tints neurons.
+ *
+ * `identity` is the default and the one that makes a connectome legible: every
+ * neuron gets its own saturated hue, so processes belonging to the same cell can
+ * be traced through a dense tangle by colour alone. Tinting a whole network by
+ * one or two accent colours — by polarity, say — produces a pretty but unreadable
+ * mass in which no individual cell can be followed.
+ */
+export type ColorMode = 'identity' | 'population' | 'receptor' | 'polarity' | 'voltage' | 'rate';
+
+export const COLOR_MODES: readonly ColorMode[] = [
+  'identity',
+  'population',
+  'receptor',
+  'polarity',
+  'voltage',
+  'rate',
+] as const;
+
+export const COLOR_MODE_LABELS: Record<ColorMode, string> = {
+  identity: 'Cell identity',
+  population: 'Population',
+  receptor: 'Neurotransmitter',
+  polarity: 'Excitatory / inhibitory',
+  voltage: 'Membrane voltage',
+  rate: 'Firing rate',
+};
+
+/**
+ * Golden-ratio conjugate. Stepping hue by this fraction gives a sequence whose
+ * every prefix is near-uniformly spread around the wheel, so neighbouring ids
+ * never land on neighbouring hues and no palette needs to be enumerated.
+ */
+const PHI_CONJUGATE = 0.618033988749895;
+
+/** Mix a 32-bit integer so that sequential ids scatter across the hue circle. */
+function mix32(value: number): number {
+  let h = value >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x7feb352d) >>> 0;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x846ca68b) >>> 0;
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+function hueToChannel(p: number, q: number, t: number): number {
+  let x = t;
+  if (x < 0) x += 1;
+  if (x > 1) x -= 1;
+  if (x < 1 / 6) return p + (q - p) * 6 * x;
+  if (x < 1 / 2) return q;
+  if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+  return p;
+}
+
+/** HSL to sRGB, all components in 0..1. */
+export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  if (s <= 0) return [l, l, l];
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [
+    hueToChannel(p, q, h + 1 / 3),
+    hueToChannel(p, q, h),
+    hueToChannel(p, q, h - 1 / 3),
+  ];
+}
+
+/**
+ * The distinct colour a neuron is drawn in under `identity` mode.
+ *
+ * Saturation and lightness are jittered within a deliberately narrow band:
+ * enough that adjacent hues stay separable, little enough that no cell is so
+ * dark it disappears against the background or so pale it reads as selected.
+ * Returned in sRGB; the renderer converts to linear at upload.
+ */
+export function identityColor(seed: number): [number, number, number] {
+  const hash = mix32(seed);
+  const hue = (hash * PHI_CONJUGATE) % 1;
+  const saturation = 0.72 + ((hash >>> 8) & 0xff) / 255 * 0.24;
+  const lightness = 0.54 + ((hash >>> 16) & 0xff) / 255 * 0.14;
+  return hslToRgb(hue, saturation, lightness);
+}
+
+/** Hex form of `identityColor`, for swatches in the chrome. */
+export function identityColorHex(seed: number): string {
+  const [r, g, b] = identityColor(seed);
+  const to = (c: number): string =>
+    Math.round(Math.min(1, Math.max(0, c)) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
 
 /** Receptor colours used for synapse rendering and legends. */
 export const RECEPTOR_COLORS = {

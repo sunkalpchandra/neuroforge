@@ -19,6 +19,9 @@ attribute float instanceVoltage;
 attribute float instanceFlash;
 attribute float instancePolarity;
 attribute float instanceFlags;
+// Per-cell tint. Computed on the CPU so the colour mode can change without a
+// shader recompile, and so the chrome can show the exact same swatch.
+attribute vec3 instanceTint;
 
 uniform float uNeuronScale;
 uniform float uSpikeSwell;
@@ -29,6 +32,7 @@ varying float vVoltage;
 varying float vFlash;
 varying float vPolarity;
 varying float vFlags;
+varying vec3 vTint;
 
 void main() {
   float flash = clamp(instanceFlash, 0.0, 1.0);
@@ -44,6 +48,7 @@ void main() {
   vVoltage = instanceVoltage;
   vFlash = flash;
   vPolarity = instancePolarity;
+  vTint = instanceTint;
   vFlags = instanceFlags;
 
   gl_Position = projectionMatrix * viewPosition;
@@ -51,6 +56,9 @@ void main() {
 `;
 
 const NEURON_FRAGMENT_BODY = /* glsl */ `
+uniform float uSaturation;
+uniform float uDimUnselected;
+uniform float uHasSelection;
 uniform vec3 uExcitatoryColor;
 uniform vec3 uInhibitoryColor;
 uniform vec3 uLightDirection;
@@ -77,6 +85,7 @@ varying float vVoltage;
 varying float vFlash;
 varying float vPolarity;
 varying float vFlags;
+varying vec3 vTint;
 
 const float PI = 3.141592653589793;
 
@@ -98,8 +107,11 @@ void main() {
   float ndv = clamp(dot(N, V), 0.0, 1.0);
   float ndl = dot(N, L);
 
-  vec3 polarityColor = mix(uExcitatoryColor, uInhibitoryColor, clamp(vPolarity, 0.0, 1.0));
-  vec3 baseColor = mix(polarityColor, voltageRamp(vVoltage), clamp(uVoltageColoring, 0.0, 1.0));
+  // The tint already encodes whichever colour mode is active; voltage remains a
+  // separate blend so it can be layered over any of them.
+  vec3 baseColor = mix(vTint, voltageRamp(vVoltage), clamp(uVoltageColoring, 0.0, 1.0));
+  float luma = dot(baseColor, vec3(0.2126, 0.7152, 0.0722));
+  baseColor = mix(vec3(luma), baseColor, uSaturation);
 
   // Wrapped diffuse stands in for light scattering through the membrane: the
   // terminator softens and the shadowed side keeps a little transmitted colour.
@@ -163,6 +175,14 @@ void main() {
   float opacity = uOpacity * mix(1.0, clamp(uGhostOpacity, 0.0, 1.0), ghosted);
   opacity = clamp(opacity + rim * 0.35 + vFlash * 0.4, 0.0, 1.0);
 
+  // Once anything is selected, everything else recedes. Tracing one cell through
+  // a dense tangle is the whole point of the view, and it is impossible while
+  // every other process is drawn at full strength. Emissive is attenuated harder
+  // than colour so dimmed cells stop feeding the bloom pass and reading as glow.
+  float attenuation = mix(1.0, clamp(uDimUnselected, 0.0, 1.0), uHasSelection * (1.0 - max(selected, hovered)));
+  color *= attenuation;
+  opacity *= mix(1.0, 0.55 + 0.45 * clamp(uDimUnselected, 0.0, 1.0), uHasSelection * (1.0 - max(selected, hovered)));
+
   gl_FragColor = vec4(color, opacity);
 }
 `;
@@ -178,6 +198,9 @@ export const NEURON_FRAGMENT_GLSL = [
 export const NEURON_UNIFORMS = {
   uNeuronScale: 'float',
   uSpikeSwell: 'float',
+  uSaturation: 'float',
+  uDimUnselected: 'float',
+  uHasSelection: 'float',
   uExcitatoryColor: 'vec3',
   uInhibitoryColor: 'vec3',
   uLightDirection: 'vec3',
