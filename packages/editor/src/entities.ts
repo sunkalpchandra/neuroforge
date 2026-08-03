@@ -101,7 +101,7 @@ const DEFAULT_WEIGHT: Record<ReceptorKind, number> = {
   gap: 0.4,
 };
 
-export function defaultWeight(receptor: ReceptorKind): number {
+function defaultWeight(receptor: ReceptorKind): number {
   return DEFAULT_WEIGHT[receptor];
 }
 
@@ -120,7 +120,7 @@ export function distanceBetween(a: Vec3, b: Vec3): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-export function clamp(value: number, min: number, max: number): number {
+function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
 }
 

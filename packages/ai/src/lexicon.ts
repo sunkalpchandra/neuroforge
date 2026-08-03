@@ -104,6 +104,27 @@ export const RECEPTOR_WORDS: Readonly<Record<string, ReceptorKind>> = {
   electrical: 'gap',
 };
 
+/**
+ * Words that name a spatial arrangement, longest-lived first so `columnar` is
+ * read the same way as `column`. A match overrides the region's default layout.
+ */
+export const LAYOUT_WORDS: readonly (readonly [string, AnalyticLayout])[] = [
+  ['lattice', 'grid'],
+  ['grid', 'grid'],
+  ['spherical', 'sphere'],
+  ['sphere', 'sphere'],
+  ['ball', 'sphere'],
+  ['laminar', 'disc'],
+  ['lamina', 'disc'],
+  ['sheet', 'disc'],
+  ['disc', 'disc'],
+  ['disk', 'disc'],
+  ['columnar', 'column'],
+  ['column', 'column'],
+  ['cylinder', 'column'],
+  ['barrel', 'column'],
+];
+
 /** Nouns that end a population phrase. */
 export const HEAD_NOUNS: ReadonlySet<string> = new Set([
   'neuron',

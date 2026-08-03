@@ -1,0 +1,17 @@
+{
+  "name": "neuroforge-core",
+  "type": "module",
+  "description": "Native simulation core for NeuroForge: membrane models, synapses, plasticity and topology analysis.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "neuroforge_core_bg.wasm",
+    "neuroforge_core.js",
+    "neuroforge_core.d.ts"
+  ],
+  "main": "neuroforge_core.js",
+  "types": "neuroforge_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

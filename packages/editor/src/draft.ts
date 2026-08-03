@@ -31,7 +31,7 @@ interface Identified extends Node {
   id: string;
 }
 
-export const COLLECTION_KEYS = [
+const COLLECTION_KEYS = [
   'neurons',
   'synapses',
   'populations',
@@ -46,7 +46,7 @@ export type CollectionKey = (typeof COLLECTION_KEYS)[number];
  * Top-level scalar and settings fields. `id` is deliberately absent: a
  * document's identity is not editable, so no command may change it.
  */
-export const FIELD_KEYS = [
+const FIELD_KEYS = [
   'name',
   'description',
   'version',
@@ -88,7 +88,7 @@ export interface CircuitDiff {
   readonly fields: readonly FieldChange[];
 }
 
-export const EMPTY_DIFF: CircuitDiff = { collections: [], fields: [] };
+const EMPTY_DIFF: CircuitDiff = { collections: [], fields: [] };
 
 export function isEmptyDiff(diff: CircuitDiff): boolean {
   return diff.collections.length === 0 && diff.fields.length === 0;
@@ -124,8 +124,12 @@ interface Slot {
   key: string;
   /** Top-level document field this slot sits under; null for the root. */
   rootKey: string | null;
+  /** 0 for the document, 1 for a collection or settings block, 2 for an entity. */
+  depth: number;
   proxy: object | null;
 }
+
+const COLLECTION_LOOKUP: ReadonlySet<string> = new Set<string>(COLLECTION_KEYS);
 
 class Draft {
   readonly root: Slot;
@@ -133,9 +137,26 @@ class Draft {
   private readonly slots = new Map<Node, Slot>();
   /** Top-level document keys that were written. */
   readonly touched = new Set<string>();
+  /**
+   * Collections whose array itself was written — assigned wholesale, spliced,
+   * sorted, pushed to. Only these need the O(collection) reconciliation in
+   * `extractDiff`; everything else is a set of in-place entity edits the draft
+   * already knows by name.
+   */
+  readonly restructured = new Set<string>();
+  /** Entities copied on write, grouped by the collection holding them. */
+  readonly copiedEntities = new Map<string, Slot[]>();
 
   constructor(base: Node) {
-    this.root = { origin: base, copy: null, owner: null, key: '', rootKey: null, proxy: null };
+    this.root = {
+      origin: base,
+      copy: null,
+      owner: null,
+      key: '',
+      rootKey: null,
+      depth: 0,
+      proxy: null,
+    };
     this.slots.set(base, this.root);
   }
 
@@ -161,7 +182,8 @@ class Draft {
       if (existing.copy === null && existing.origin === value) {
         existing.owner = owner;
         existing.key = key;
-        existing.rootKey = owner.owner === null ? key : owner.rootKey;
+        existing.rootKey = owner.depth === 0 ? key : owner.rootKey;
+        existing.depth = owner.depth + 1;
       }
       return existing;
     }
@@ -170,7 +192,8 @@ class Draft {
       copy: null,
       owner,
       key,
-      rootKey: owner.owner === null ? key : owner.rootKey,
+      rootKey: owner.depth === 0 ? key : owner.rootKey,
+      depth: owner.depth + 1,
       proxy: null,
     };
     this.slots.set(value, slot);
@@ -183,6 +206,11 @@ class Draft {
     const copy = shallowCopy(slot.origin);
     slot.copy = copy;
     this.slots.set(copy, slot);
+    if (slot.depth === 2 && slot.rootKey !== null && COLLECTION_LOOKUP.has(slot.rootKey)) {
+      const siblings = this.copiedEntities.get(slot.rootKey);
+      if (siblings === undefined) this.copiedEntities.set(slot.rootKey, [slot]);
+      else siblings.push(slot);
+    }
     if (slot.owner !== null) {
       attach(this.writable(slot.owner), slot.key, slot.origin, copy);
     }
@@ -190,7 +218,16 @@ class Draft {
   }
 
   markTouched(slot: Slot, key: string): void {
-    this.touched.add(slot.owner === null ? key : (slot.rootKey ?? key));
+    if (slot.depth === 0) {
+      this.touched.add(key);
+      this.restructured.add(key);
+      return;
+    }
+    const rootKey = slot.rootKey ?? key;
+    this.touched.add(rootKey);
+    // A write landing directly on a top-level array is a membership or ordering
+    // change; a write two levels down is an edit to one entity's contents.
+    if (slot.depth === 1) this.restructured.add(rootKey);
   }
 
   proxy(slot: Slot): object {
@@ -318,12 +355,37 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+/**
+ * Reconcile a collection whose array was rewritten. This is the only path that
+ * costs O(collection); it compares references, never contents, and deep-copies
+ * nothing.
+ */
 function diffCollection(
   key: CollectionKey,
   before: readonly Identified[],
   after: readonly Identified[],
 ): CollectionChange | null {
   if (before === after) return null;
+
+  // Same members in the same places: only replacements, no ordering record.
+  if (before.length === after.length) {
+    let aligned = true;
+    for (let i = 0; i < before.length; i += 1) {
+      if (before[i].id !== after[i].id) {
+        aligned = false;
+        break;
+      }
+    }
+    if (aligned) {
+      const replaced: EntityChange[] = [];
+      for (let i = 0; i < before.length; i += 1) {
+        if (before[i] !== after[i]) {
+          replaced.push({ id: after[i].id, before: before[i], after: after[i] });
+        }
+      }
+      return replaced.length === 0 ? null : { key, order: null, entities: replaced };
+    }
+  }
 
   const previous = new Map<string, Identified>();
   for (let i = 0; i < before.length; i += 1) previous.set(before[i].id, before[i]);
@@ -354,10 +416,10 @@ function diffCollection(
   return { key, order, entities };
 }
 
-function extractDiff(before: Node, after: Node, touched: ReadonlySet<string>): CircuitDiff {
+function extractDiff(draft: Draft, before: Node, after: Node): CircuitDiff {
   const fields: FieldChange[] = [];
   for (const key of FIELD_KEYS) {
-    if (!touched.has(key)) continue;
+    if (!draft.touched.has(key)) continue;
     if (before[key] !== after[key]) {
       fields.push({ key, before: before[key], after: after[key] });
     }
@@ -365,7 +427,22 @@ function extractDiff(before: Node, after: Node, touched: ReadonlySet<string>): C
 
   const collections: CollectionChange[] = [];
   for (const key of COLLECTION_KEYS) {
-    if (!touched.has(key)) continue;
+    if (!draft.touched.has(key)) continue;
+
+    if (!draft.restructured.has(key)) {
+      // Nothing moved, so the draft's own record of which entities it copied is
+      // the complete answer and the collection never has to be walked.
+      const copied = draft.copiedEntities.get(key);
+      if (copied === undefined || copied.length === 0) continue;
+      const entities: EntityChange[] = copied.map((slot) => ({
+        id: (slot.origin as Identified).id,
+        before: slot.origin as Identified,
+        after: slot.copy as Identified,
+      }));
+      collections.push({ key, order: null, entities });
+      continue;
+    }
+
     const change = diffCollection(
       key,
       before[key] as readonly Identified[],
@@ -406,7 +483,7 @@ export function runDraft(
   const next = draft.result;
   if (!track) return { circuit: next as unknown as Circuit, diff: null };
 
-  const diff = extractDiff(root, next, draft.touched);
+  const diff = extractDiff(draft, root, next);
   if (isEmptyDiff(diff)) return { circuit: base, diff: EMPTY_DIFF };
   return { circuit: next as unknown as Circuit, diff };
 }

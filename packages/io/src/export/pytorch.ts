@@ -35,6 +35,7 @@ import {
   pyFloatList,
   pyInt,
   pyIntList,
+  pyStimulusPayload,
   pyStr,
   restingState,
 } from './common';
@@ -70,8 +71,13 @@ function groupNeurons(model: ExportCircuit, group: ExportGroup): Neuron[] {
   return model.neurons.slice(group.offset, group.offset + group.size);
 }
 
+/**
+ * A per-neuron parameter vector. `pyFloatList` already brackets its output, so
+ * the literal must not be wrapped again: a second pair would make every one of
+ * these a [1, N] row rather than the [N] vector the updates broadcast against.
+ */
 function buffer(name: string, values: readonly number[]): string {
-  return `self.register_buffer(${pyStr(name)}, torch.tensor([${pyFloatList(values, 8, 12)}], dtype=dtype))`;
+  return `self.register_buffer(${pyStr(name)}, torch.tensor(${pyFloatList(values, 8, 12)}, dtype=dtype))`;
 }
 
 function parameterBuffers(model: ExportCircuit, group: ExportGroup, index: number): string[] {
@@ -267,32 +273,9 @@ function stimulusTable(model: ExportCircuit): string[] {
   const rows: string[] = [];
   for (const { stimulus, targets } of model.stimuli) {
     const p = stimulus.pattern;
-    let payload: string;
-    switch (p.kind) {
-      case 'constant':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}}`;
-        break;
-      case 'step':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-      case 'pulse-train':
-        payload =
-          `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, ` +
-          `'width': ${pyFloat(p.width)}, 'start': ${pyFloat(p.start)}}`;
-        break;
-      case 'sine':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, 'offset': ${pyFloat(p.offset)}}`;
-        break;
-      case 'poisson':
-        payload = `{'rate': ${pyFloat(p.rate)}, 'amplitude': ${pyFloat(p.amplitude)}, 'seed': ${pyInt(p.seed)}}`;
-        break;
-      case 'ramp':
-        payload =
-          `{'from': ${pyFloat(p.from)}, 'to': ${pyFloat(p.to)}, ` +
-          `'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-    }
-    rows.push(`    (${pyStr(p.kind)}, ${pyIntList(targets)}, ${payload}),  # ${stimulus.name}`);
+    rows.push(
+      `    (${pyStr(p.kind)}, ${pyIntList(targets)}, ${pyStimulusPayload(p)}),  # ${stimulus.name}`,
+    );
   }
   return rows;
 }
@@ -493,11 +476,14 @@ export function exportPyTorch(circuit: Circuit): string {
   });
   out.push('');
   out.push('        self.cursor = 0');
-  out.push("        self.register_buffer('v', self.v_rest.clone())");
-  out.push("        self.register_buffer('w_adapt', self.w_rest.clone())");
-  out.push("        self.register_buffer('gate_m', self.m_rest.clone())");
-  out.push("        self.register_buffer('gate_h', self.h_rest.clone())");
-  out.push("        self.register_buffer('gate_n', self.n_rest.clone())");
+  out.push('        # State buffers carry an explicit leading batch dimension: every update');
+  out.push('        # below slices them as [:, a:b], and `forward` compares dim 0 against the');
+  out.push('        # batch size to decide whether the state has to be rebuilt.');
+  out.push("        self.register_buffer('v', self.v_rest.clone().unsqueeze(0))");
+  out.push("        self.register_buffer('w_adapt', self.w_rest.clone().unsqueeze(0))");
+  out.push("        self.register_buffer('gate_m', self.m_rest.clone().unsqueeze(0))");
+  out.push("        self.register_buffer('gate_h', self.h_rest.clone().unsqueeze(0))");
+  out.push("        self.register_buffer('gate_n', self.n_rest.clone().unsqueeze(0))");
   out.push("        self.register_buffer('refractory', torch.zeros(1, N_NEURONS, dtype=dtype))");
   out.push("        self.register_buffer('above', torch.zeros(1, N_NEURONS, dtype=dtype))");
   out.push(
@@ -554,7 +540,10 @@ export function exportPyTorch(circuit: Circuit): string {
   out.push('            current = current.unsqueeze(1)');
   out.push('        n_steps = current.shape[0]');
   out.push('        batch = current.shape[1]');
-  out.push('        if self.v.shape[0] != batch or self.v.device != current.device:');
+  out.push(
+    '        if (self.v.shape[0] != batch or self.v.device != current.device' +
+      ' or self.v.dtype != current.dtype):',
+  );
   out.push('            self.reset_state(batch, device=current.device, dtype=current.dtype)');
   out.push('');
   out.push('        v = self.v');
@@ -599,10 +588,13 @@ export function exportPyTorch(circuit: Circuit): string {
     for (const line of groupUpdate(group, index)) out.push(indentBlock(line, 12));
   });
   const names = model.groups.map((_, index) => `g${index}`);
-  const cat = (prefix: string): string =>
-    names.length === 1
-      ? `${prefix}_${names[0]}`
-      : `torch.cat([${names.map((n) => `${prefix}_${n}`).join(', ')}], dim=1)`;
+  // torch.cat rejects an empty list, so a circuit with no membrane groups at all
+  // has to name the empty state explicitly rather than concatenate nothing.
+  const cat = (prefix: string): string => {
+    if (names.length === 0) return 'torch.zeros(batch, 0, dtype=v.dtype, device=v.device)';
+    if (names.length === 1) return `${prefix}_${names[0]}`;
+    return `torch.cat([${names.map((n) => `${prefix}_${n}`).join(', ')}], dim=1)`;
+  };
   out.push('');
   out.push(`            spikes = ${cat('s')}`);
   out.push(`            v = ${cat('nv')}`);

@@ -31,7 +31,9 @@ export class MeshSink {
     const at = this.position.length / 3;
     this.position.push(x, y, z);
     this.normal.push(nx, ny, nz);
-    this.branchT.push(t < 0 ? 0 : t > 1 ? 1 : t);
+    // Ordered so that a NaN parameter — which a zero-extent morphology can
+    // produce — lands at the soma rather than propagating into the attribute.
+    this.branchT.push(t > 0 ? (t < 1 ? t : 1) : 0);
     return at;
   }
 

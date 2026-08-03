@@ -17,6 +17,7 @@ import {
   FIRING_WORDS,
   GENERIC_REGION,
   HEAD_NOUNS,
+  LAYOUT_WORDS,
   MODEL_WORDS,
   PHRASE_BOUNDARIES,
   POLARITY_WORDS,
@@ -27,7 +28,7 @@ import {
   RHYTHM_WORDS,
   bandForFrequency,
 } from './lexicon';
-import type { FiringPattern, RegionProfile } from './lexicon';
+import type { AnalyticLayout, FiringPattern, RegionProfile } from './lexicon';
 import {
   IZHIKEVICH_ONLY_PATTERNS,
   interneuronParams,
@@ -58,6 +59,46 @@ const SWITCH_VERBS = ['switch', 'convert', 'change', 'turn', 'replace', 'swap', 
 const RECURRENCE_WORDS = ['recurrent', 'recurrently', 'recurrence', 'circuit', 'network', 'microcircuit', 'loop', 'attractor'];
 const STIMULUS_TRIGGERS = ['stimulate', 'stimulus', 'stimuli', 'inject', 'injection', 'input', 'inputs', 'drive', 'driving'];
 const STIMULUS_PATTERN_WORDS = ['poisson', 'step', 'ramp', 'sine', 'sinusoidal', 'pulse-train', 'constant', 'tonic', 'train', 'pulses'];
+/** Words that sit between a verb and the noun phrase it governs. */
+const DETERMINERS: ReadonlySet<string> = new Set([
+  'a', 'all', 'an', 'any', 'both', 'each', 'every', 'her', 'his', 'its', 'my', 'our', 'some',
+  'that', 'the', 'their', 'these', 'this', 'those', 'your',
+]);
+/**
+ * Verbs that unambiguously ask for new neurons. `make` is deliberately absent:
+ * it is causative at least as often as it is creative ("make them fire faster").
+ */
+const CREATION_VERBS: ReadonlySet<string> = new Set([
+  'add', 'append', 'build', 'create', 'generate', 'give', 'include', 'insert', 'instantiate',
+  'place', 'put', 'spawn',
+]);
+/** Words that say an edit applies to the whole circuit rather than one population. */
+const GLOBAL_SCOPE_WORDS = ['everything', 'every', 'all', 'both', 'each', 'entire', 'whole'];
+/** Words joining conjuncts that share a governing verb. */
+const COORDINATORS: ReadonlySet<string> = new Set(['and', 'or', 'plus', 'with', 'along']);
+/**
+ * Tokens that end a clause, so the search for a governing verb does not reach
+ * back into a previous sentence and inherit its verb.
+ */
+const SENTENCE_ENDS: ReadonlySet<string> = new Set(['.', ';', '!', '?', 'then']);
+/**
+ * Match strength at which a countless phrase with no creation verb is read as
+ * naming a population the document already holds. One agreeing attribute is
+ * enough here — with neither a count nor a creation verb the phrase is far more
+ * likely to be pointing at existing cells than asking for new ones.
+ */
+const REFERENCE_SCORE = 2;
+
+/**
+ * How much a word naming an attribute says about a population: it counts for the
+ * candidate that has that attribute and just as much against one that does not.
+ * Without the negative half, "purkinje cells" would match a basket population on
+ * the strength of them both being inhibitory.
+ */
+function agreement<T>(named: T | undefined, actual: T): number {
+  if (named === undefined) return 0;
+  return named === actual ? 2 : -2;
+}
 
 interface KnownPopulation {
   name: string;
@@ -98,6 +139,12 @@ interface ConnectRequest {
   tail: string;
 }
 
+interface StimulusRequest {
+  pattern: StimulusPattern;
+  /** The phrase naming the population to drive, or null when the prompt named none. */
+  targetText: string | null;
+}
+
 /**
  * Deterministic offline planner. Runs with no network access and no API key, and
  * is the reference behaviour the hosted models are prompted to imitate.
@@ -117,7 +164,13 @@ class Planner {
   private readonly created: KnownPopulation[] = [];
   private readonly reservedPopulationNames = new Set<string>();
   private readonly reservedProjectionNames = new Set<string>();
+  /** Words recognised before population phrases are cut, and claimed after. */
+  private readonly deferredClaims: string[] = [];
+  /** Existing populations the prompt pointed at rather than asked to create. */
+  private readonly focus: KnownPopulation[] = [];
+  private focusUsed = false;
   private region: RegionProfile = GENERIC_REGION;
+  private layoutOverride: AnalyticLayout | null = null;
   private cleared = false;
   private seedCounter = 0;
 
@@ -147,6 +200,7 @@ class Planner {
     this.applySpeed();
     this.applyStimulus(stimulus);
     this.reportOrphans();
+    this.reportUnusedFocus();
     this.reportLeftovers();
     return { summary: this.buildSummary(), actions: this.actions, warnings: this.warnings };
   }
@@ -188,36 +242,75 @@ class Planner {
     );
   }
 
-  private largest(polarity: NeuronPolarity): KnownPopulation | null {
+  private largestOf(
+    pool: readonly KnownPopulation[],
+    polarity: NeuronPolarity,
+  ): KnownPopulation | null {
     let best: KnownPopulation | null = null;
-    for (const population of this.populations) {
+    for (const population of pool) {
       if (population.polarity !== polarity) continue;
       if (best === null || population.size > best.size) best = population;
     }
     return best;
   }
 
-  /** Claim every token of `word` in the prompt and report whether any existed. */
-  private claimWord(word: string): boolean {
-    let found = false;
+  private largest(polarity: NeuronPolarity): KnownPopulation | null {
+    return this.largestOf(this.populations, polarity);
+  }
+
+  /**
+   * The population an unqualified reference means. A population this plan just
+   * created wins over one the document already held, because "drive them" in
+   * "add 200 excitatory neurons and drive them" is about the new cells.
+   */
+  private subjectPopulation(): KnownPopulation | null {
+    return (
+      this.largestOf(this.created, 'excitatory') ??
+      this.largestOf(this.created, 'inhibitory') ??
+      this.largest('excitatory') ??
+      this.largest('inhibitory')
+    );
+  }
+
+  /** Claim every occurrence of `word` in the prompt. */
+  private claimWord(word: string): void {
     for (let i = this.scan.indexOf(word); i !== -1; i = this.scan.indexOf(word, i + 1)) {
       this.scan.claim(i);
-      found = true;
     }
-    return found;
   }
 
   private claimWords(words: readonly string[]): void {
     for (const word of words) this.claimWord(word);
   }
 
-  /** First unclaimed token from `words`, or null. A claimed token already has a meaning. */
-  private firstOf(words: readonly string[]): string | null {
+  /** Index of the first unclaimed token from `words`, or -1. A claimed token already has a meaning. */
+  private firstIndexOf(words: readonly string[]): number {
     for (let i = 0; i < this.scan.length; i += 1) {
       if (this.scan.isClaimed(i)) continue;
-      if (words.includes(this.scan.word(i))) return this.scan.word(i);
+      if (words.includes(this.scan.word(i))) return i;
     }
-    return null;
+    return -1;
+  }
+
+  private firstOf(words: readonly string[]): string | null {
+    const index = this.firstIndexOf(words);
+    return index === -1 ? null : this.scan.word(index);
+  }
+
+  /** The layout every population in this plan is built with. */
+  private newLayout(size: number): PopulationLayout {
+    return layoutFor(this.layoutOverride ?? this.region.layout, size, this.nextSeed());
+  }
+
+  /**
+   * Claim the region and layout words. Deferred until after `createPopulations`
+   * so the backwards walk that collects a population's modifiers can still cross
+   * them — "add 100 cortical neurons" needs `cortical` to stay unclaimed long
+   * enough for `neurons` to reach the count in front of it.
+   */
+  private flushDeferredClaims(): void {
+    this.claimWords(this.deferredClaims);
+    this.deferredClaims.length = 0;
   }
 
   // ------------------------------------------------------------------- phases
@@ -244,9 +337,17 @@ class Planner {
     for (const [word, profile] of REGION_WORDS) {
       if (!this.scan.has(word)) continue;
       if (matched === null) matched = profile;
-      this.claimWord(word);
+      this.deferredClaims.push(word);
     }
     if (matched !== null) this.region = matched;
+  }
+
+  private detectLayout(): void {
+    for (const [word, layout] of LAYOUT_WORDS) {
+      if (!this.scan.has(word)) continue;
+      if (this.layoutOverride === null) this.layoutOverride = layout;
+      this.deferredClaims.push(word);
+    }
   }
 
   private seedFromCircuit(): void {
@@ -328,15 +429,45 @@ class Planner {
       ) {
         start -= 1;
       }
-      const boundary = start > 0 ? this.scan.word(start - 1) : '';
       const modifiers = this.scan.slice(start, head + 1);
 
-      if (REMOVAL_VERBS.has(boundary)) {
-        this.scan.claimRange(start - 1, head + 1);
+      // The verb governing the phrase can sit behind a determiner the backwards
+      // walk already stopped at: "remove the basket cells" boundaries on "the".
+      let verb = start - 1;
+      while (verb >= 0 && DETERMINERS.has(this.scan.word(verb))) verb -= 1;
+      // A conjunct inherits the verb governing the list it belongs to. In
+      // "create 200 excitatory neurons and inhibitory basket cells" the second
+      // phrase is governed by "create", not by "and"; without this it reads as
+      // naming cells the circuit already has and no population is created.
+      if (verb >= 0 && COORDINATORS.has(this.scan.word(verb))) {
+        for (let i = verb - 1; i >= 0; i -= 1) {
+          const word = this.scan.word(i);
+          if (CREATION_VERBS.has(word) || REMOVAL_VERBS.has(word)) {
+            verb = i;
+            break;
+          }
+          if (SENTENCE_ENDS.has(word)) break;
+        }
+      }
+      const governing = verb >= 0 ? this.scan.word(verb) : '';
+      if (REMOVAL_VERBS.has(governing)) {
+        this.scan.claimRange(verb, head + 1);
         this.warn(
           'Removing neurons is not something the offline planner can express; that part of the request was skipped.',
         );
         continue;
+      }
+
+      // "Make the basket cells fire faster" names a population that already
+      // exists; only a count or an explicit creation verb makes a phrase a
+      // request for new neurons.
+      if (parseCount(modifiers) === null && !CREATION_VERBS.has(governing)) {
+        const referenced = this.referencedPopulation(modifiers);
+        if (referenced !== null) {
+          this.scan.claimRange(start, head + 1);
+          if (!this.focus.includes(referenced)) this.focus.push(referenced);
+          continue;
+        }
       }
 
       const draft = this.draftFromPhrase(modifiers, word, drafts);
@@ -417,7 +548,7 @@ class Planner {
       archetype: resolvedArchetype,
       pattern: resolvedPattern,
       params,
-      layout: layoutFor(this.region.layout, size, this.nextSeed()),
+      layout: this.newLayout(size),
     };
   }
 
@@ -486,31 +617,53 @@ class Planner {
         continue;
       }
       if (this.findProjection(source.name, target.name) !== null) {
-        this.warn(`${source.name} is already connected to ${target.name}; the request was skipped.`);
+        this.warn(
+          `${source.name} already projects to ${target.name}, and the connectivity of a projection that exists cannot be re-drawn in place; that request was skipped.`,
+        );
         continue;
       }
-      this.connect(source, target, this.ruleFromTail(request.tail), this.receptorFromTail(request.tail, source));
+      // The lookahead that ends the target phrase does not fire on a trailing
+      // "all-to-all", so a rule can land inside the target text rather than the
+      // tail. Both are searched for the qualifiers.
+      const qualifiers = `${request.targetText} ${request.tail}`;
+      this.connect(
+        source,
+        target,
+        this.ruleFromTail(qualifiers),
+        this.receptorFromTail(qualifiers, source),
+      );
     }
   }
 
+  /** How strongly a phrase describes one population: by name, polarity, morphology or model. */
+  private matchScore(
+    candidate: KnownPopulation,
+    words: readonly string[],
+    phrase: string,
+  ): number {
+    const name = candidate.name.toLowerCase();
+    let score = phrase.includes(name) ? 10 : 0;
+    const nameWords = name.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
+    for (const word of words) {
+      // Generated names end in the same head nouns every phrase uses, so
+      // matching on one would make "the neurons" name "Pyramidal Neurons".
+      if (!HEAD_NOUNS.has(word) && nameWords.includes(word)) score += 3;
+      score += agreement(POLARITY_WORDS[word], candidate.polarity);
+      score += agreement(ARCHETYPE_WORDS[word], candidate.archetype);
+      score += agreement(MODEL_WORDS[word], candidate.model);
+    }
+    return score;
+  }
+
   private resolvePopulation(phrase: string): KnownPopulation | null {
-    const words = phrase.toLowerCase().match(/[a-z0-9]+(?:[-'][a-z0-9]+)*/g) ?? [];
-    if (words.length === 0) return null;
     const lower = phrase.toLowerCase();
+    const words = lower.match(/[a-z0-9]+(?:[-'][a-z0-9]+)*/g) ?? [];
+    if (words.length === 0) return null;
     let best: KnownPopulation | null = null;
     let bestScore = 0;
     let tied = false;
     for (const candidate of this.populations) {
-      let score = 0;
-      const candidateName = candidate.name.toLowerCase();
-      if (lower.includes(candidateName)) score += 10;
-      const nameWords = candidateName.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
-      for (const word of words) {
-        if (nameWords.includes(word)) score += 3;
-        if (POLARITY_WORDS[word] === candidate.polarity) score += 2;
-        if (ARCHETYPE_WORDS[word] === candidate.archetype) score += 2;
-        if (MODEL_WORDS[word] === candidate.model) score += 1;
-      }
+      const score = this.matchScore(candidate, words, lower);
       if (score > bestScore) {
         bestScore = score;
         best = candidate;
@@ -525,6 +678,47 @@ class Planner {
       );
     }
     return bestScore > 0 ? best : null;
+  }
+
+  /**
+   * The population a phrase points at, when it points at exactly one that the
+   * document already holds. Populations this plan creates are excluded: a phrase
+   * cannot be referring to something that did not exist when it was written.
+   */
+  private referencedPopulation(words: readonly string[]): KnownPopulation | null {
+    const phrase = words.join(' ');
+    let best: KnownPopulation | null = null;
+    let bestScore = 0;
+    let tied = false;
+    for (const candidate of this.populations) {
+      if (candidate.planned) continue;
+      const score = this.matchScore(candidate, words, phrase);
+      if (score > bestScore) {
+        bestScore = score;
+        best = candidate;
+        tied = false;
+      } else if (score === bestScore && score > 0) {
+        tied = true;
+      }
+    }
+    return bestScore >= REFERENCE_SCORE && !tied ? best : null;
+  }
+
+  /**
+   * The populations an unqualified edit applies to: the ones the prompt named,
+   * or all of them when it named none.
+   */
+  private focusedPopulations(): readonly KnownPopulation[] {
+    if (this.focus.length === 0) return this.populations;
+    this.focusUsed = true;
+    return this.focus;
+  }
+
+  /** Claim bare head nouns, which an edit that spans every population has addressed. */
+  private claimHeadNouns(): void {
+    for (let i = 0; i < this.scan.length; i += 1) {
+      if (HEAD_NOUNS.has(this.scan.word(i))) this.scan.claim(i);
+    }
   }
 
   private ruleFromTail(tail: string): ConnectivityRule {
@@ -672,11 +866,16 @@ class Planner {
     this.claimWords(SWITCH_VERBS);
 
     if (this.populations.length === 0) {
-      this.warn(`There are no populations to switch to ${kind}.`);
+      this.warn(`There are no populations to switch to ${NEURON_MODEL_LABELS[kind]}.`);
       return;
     }
+    const targets = this.focusedPopulations();
+    if (targets === this.populations && this.scan.hasAny(GLOBAL_SCOPE_WORDS)) {
+      this.claimWords(GLOBAL_SCOPE_WORDS);
+      this.claimHeadNouns();
+    }
     let changed = 0;
-    for (const population of this.populations) {
+    for (const population of targets) {
       if (population.model === kind) continue;
       population.model = kind;
       changed += 1;
@@ -690,17 +889,21 @@ class Planner {
     // different thing from failing to understand it, and the generic
     // "not understood" fallback would report the wrong one.
     if (changed === 0) {
-      this.warn(`Every population already uses ${NEURON_MODEL_LABELS[kind]}; nothing to change.`);
+      const scope = targets === this.populations ? 'Every population' : targets[0].name;
+      this.warn(`${scope} already uses ${NEURON_MODEL_LABELS[kind]}; nothing to change.`);
     }
   }
 
   private detectRhythm(): { hz: number; explicit: boolean } | null {
-    const explicit = /(\d+(?:\.\d+)?)\s*(?:hz|hertz)\b/.exec(this.scan.text);
-    if (explicit !== null) {
-      this.scan.claimChars(explicit.index, explicit.index + explicit[0].length);
+    // A frequency already claimed belongs to whatever claimed it — the rate of a
+    // Poisson drive is not a rhythm target — so take the first free one.
+    for (const match of this.scan.matchAll(/(\d+(?:\.\d+)?)\s*(?:hz|hertz)\b/g)) {
+      const end = match.index + match[0].length;
+      if (this.scan.isRangeClaimed(match.index, end)) continue;
+      this.scan.claimChars(match.index, end);
       this.claimWords(['frequency', 'band', 'rhythm', 'oscillate', 'at']);
       this.claimWords(RHYTHM_WORDS);
-      return { hz: clamp(Number.parseFloat(explicit[1]), 0.1, 1000), explicit: true };
+      return { hz: clamp(Number.parseFloat(match[1]), 0.1, 1000), explicit: true };
     }
     for (const band of RHYTHM_BANDS) {
       const word = this.firstOf(band.words);
@@ -758,7 +961,7 @@ class Planner {
         archetype: this.region.inhibitoryArchetype,
         pattern: 'fast-spiking',
         params: interneuronParams(excitatory.model, hz >= 30),
-        layout: layoutFor(this.region.layout, size, this.nextSeed()),
+        layout: this.newLayout(size),
       };
       this.emitPopulations([draft]);
       inhibitory = this.populations[this.populations.length - 1];
@@ -894,12 +1097,15 @@ class Planner {
 
     if (this.scan.hasAny(RATE_WORDS)) {
       this.claimWords(RATE_WORDS);
+      // The bare noun naming the cells — "the neurons" in "make the neurons fire
+      // faster" — is the subject of this edit and so has been addressed.
+      this.claimHeadNouns();
       if (this.populations.length === 0) {
         this.warn('There are no populations whose firing rate could be changed.');
         return;
       }
       const step = speedingUp ? 80 : -80;
-      for (const population of this.populations) {
+      for (const population of this.focusedPopulations()) {
         const bias = Math.round(clamp(population.bias + step, -5000, 5000));
         population.bias = bias;
         this.actions.push({
@@ -917,37 +1123,79 @@ class Planner {
 
   // ---------------------------------------------------------------- stimuli
 
-  private applyStimulus(): void {
-    const triggerIndex = this.scan.indexOfAny(STIMULUS_TRIGGERS);
-    if (triggerIndex === -1 || this.scan.isClaimed(triggerIndex)) return;
-    const start = this.scan.tokens[triggerIndex].start;
-    const sentence = this.scan.text.slice(this.sentenceStart(start), this.sentenceEnd(start));
-    const patternWord = STIMULUS_PATTERN_WORDS.find((word) =>
-      new RegExp(`\\b${word}\\b`).test(sentence),
-    );
+  /**
+   * Read the external-drive request out of the prompt and claim the words that
+   * describe it.
+   *
+   * This runs before populations are drafted because a drive names its target
+   * with the same grammar a new population uses — "…to the excitatory
+   * population" would otherwise be cut as a population phrase and instantiated.
+   * The target is only a phrase at this point; it is resolved in
+   * `applyStimulus`, once every population the plan creates exists.
+   */
+  private collectStimulusRequest(): StimulusRequest | null {
+    const triggerIndex = this.firstIndexOf(STIMULUS_TRIGGERS);
+    if (triggerIndex === -1) return null;
+    const trigger = this.scan.tokens[triggerIndex].start;
+    const from = this.sentenceStart(trigger);
+    const to = this.sentenceEnd(trigger);
+    const sentence = this.scan.text.slice(from, to);
+
+    let patternWord: string | null = null;
+    let patternAt = Number.POSITIVE_INFINITY;
+    for (const word of STIMULUS_PATTERN_WORDS) {
+      const match = new RegExp(`\\b${word}\\b`).exec(sentence);
+      if (match === null || match.index >= patternAt) continue;
+      patternAt = match.index;
+      patternWord = word;
+    }
     const amplitudeMatch = /(\d+(?:\.\d+)?)\s*pa\b/.exec(sentence);
-    if (patternWord === undefined && amplitudeMatch === null) return;
+    // A bare "drive it" says nothing about what to inject; leave it to the
+    // leftover report rather than inventing a waveform.
+    if (patternWord === null && amplitudeMatch === null) return null;
 
-    const amplitude = amplitudeMatch === null ? 150 : clamp(Number.parseFloat(amplitudeMatch[1]), -1e5, 1e5);
+    const amplitude =
+      amplitudeMatch === null ? 150 : clamp(Number.parseFloat(amplitudeMatch[1]), -1e5, 1e5);
     const frequencyMatch = /(\d+(?:\.\d+)?)\s*(?:hz|hertz)\b/.exec(sentence);
-    const frequency = frequencyMatch === null ? 10 : clamp(Number.parseFloat(frequencyMatch[1]), 0.01, 1000);
-    const pattern = this.stimulusPattern(patternWord ?? 'constant', amplitude, frequency);
+    const frequency =
+      frequencyMatch === null ? 10 : clamp(Number.parseFloat(frequencyMatch[1]), 0.01, 1000);
 
-    const targetMatch = /\b(?:to|into|onto)\s+([\s\S]{1,60}?)(?=\s+(?:with|at|using|and)\b|[.;!?]|$)/.exec(sentence);
-    const target =
-      (targetMatch === null ? null : this.resolvePopulation(targetMatch[1])) ??
-      this.largest('excitatory') ??
-      this.largest('inhibitory');
+    // Claim from the earliest word that describes the drive, not from the
+    // trigger, so "add a poisson input …" does not leave "poisson" behind.
+    const start = Math.min(
+      trigger,
+      patternWord === null ? Number.POSITIVE_INFINITY : from + patternAt,
+      amplitudeMatch === null ? Number.POSITIVE_INFINITY : from + amplitudeMatch.index,
+    );
+    this.scan.claimChars(start, to);
+
+    const tail = this.scan.text.slice(start, to);
+    const targetMatch =
+      /\b(?:to|into|onto)\s+([\s\S]{1,60}?)(?=\s+(?:with|at|using|and)\b|[.;!?]|$)/.exec(tail);
+    return {
+      pattern: this.stimulusPattern(patternWord ?? 'constant', amplitude, frequency),
+      targetText: targetMatch === null ? null : targetMatch[1],
+    };
+  }
+
+  private applyStimulus(request: StimulusRequest | null): void {
+    if (request === null) return;
+    const named = request.targetText === null ? null : this.resolvePopulation(request.targetText);
+    if (named === null && request.targetText !== null) {
+      this.warn(
+        `Could not tell which population "${request.targetText.trim()}" refers to, so the drive was attached to the largest one instead.`,
+      );
+    }
+    const target = named ?? this.subjectPopulation();
     if (target === null) {
       this.warn('There is no population to attach a stimulus to, so the drive was skipped.');
       return;
     }
-    this.scan.claimChars(this.sentenceStart(start), this.sentenceEnd(start));
     this.actions.push({
       type: 'add-stimulus',
       targetPopulation: target.name,
-      pattern,
-      name: `${titleCase(pattern.kind)} drive`,
+      pattern: request.pattern,
+      name: `${titleCase(request.pattern.kind)} drive`,
     });
   }
 
@@ -979,6 +1227,14 @@ class Planner {
 
   // ----------------------------------------------------------------- reporting
 
+  private reportUnusedFocus(): void {
+    if (this.focus.length === 0 || this.focusUsed) return;
+    const names = this.focus.map((population) => population.name).join(', ');
+    this.warn(
+      `${names} was read as a reference to cells the circuit already has, but the request did not say what to change about it.`,
+    );
+  }
+
   private reportLeftovers(): void {
     const leftover = this.scan.unclaimedWords(8);
     if (leftover.length === 0) return;
@@ -988,8 +1244,15 @@ class Planner {
 
   private buildSummary(): string {
     if (this.actions.length === 0) {
-      this.warn('Nothing in this request maps to a circuit edit that can be made offline.');
-      return 'No changes: the offline planner could not turn this request into circuit edits.';
+      // An earlier pass may already have said exactly why nothing was emitted —
+      // that the projection exists, that the model is already in use. Adding the
+      // generic fallback on top of a specific reason contradicts it, and reads as
+      // though the planner failed to understand a request it understood fine.
+      if (this.warnings.length === 0) {
+        this.warn('Nothing in this request maps to a circuit edit that can be made offline.');
+        return 'No changes: the offline planner could not turn this request into circuit edits.';
+      }
+      return 'No changes: every part of this request was already satisfied or could not be applied.';
     }
     const parts: string[] = [];
     if (this.cleared) parts.push('cleared the circuit');

@@ -16,15 +16,6 @@ import type { Integrator, StepResult } from './types';
  */
 
 /**
- * Path to the wasm-bindgen glue for `crates/neuroforge-core`.
- *
- * Assembled at runtime rather than written as a literal: the artifact is
- * gitignored and usually absent, and a literal specifier would make the module
- * a compile-time dependency of a package that must build without it.
- */
-const WASM_MODULE_PATH = ['..', 'wasm', 'neuroforge_core.js'].join('/');
-
-/**
  * The subset of the Rust core's `Network` this bridge calls.
  *
  * Every `*_ptr` accessor returns a byte offset into wasm linear memory. The
@@ -256,7 +247,11 @@ function loadModule(): Promise<WasmModule | null> {
     modulePromise = (async () => {
       if (typeof WebAssembly === 'undefined') return null;
       try {
-        const imported: unknown = await import(WASM_MODULE_PATH);
+        // The specifier must be a literal. A computed path cannot be traced by
+        // the bundler, so the module is never emitted, the import fails at
+        // runtime, and the catch below silently downgrades every user to the
+        // TypeScript integrator with no indication the native core exists.
+        const imported: unknown = await import('../wasm/neuroforge_core.js');
         return await adoptModule(imported);
       } catch {
         return null;
@@ -329,8 +324,7 @@ export class WasmIntegrator implements Integrator {
     }
 
     const views = this.synchronise(buffers, settings);
-    const n = buffers.neurons.count;
-    views.iExt.set(buffers.neurons.iExt.subarray(0, n));
+    this.uploadPerStep(buffers, views);
 
     if (Math.abs(this.network.time() - buffers.time) > 1e-9) {
       this.network.set_time(buffers.time);
@@ -482,6 +476,26 @@ export class WasmIntegrator implements Integrator {
       logNeuron: u32(network.spike_log_neuron_ptr(), logCapacity),
       logTime: f32(network.spike_log_time_ptr(), logCapacity),
     };
+  }
+
+  /**
+   * Re-upload the columns the host rewrites between steps.
+   *
+   * `iExt` is rewritten by `applyStimuli` and by the poke tool every frame, but
+   * it is not the only one: `bias`, `noise` and `enabled` are edited from the
+   * inspector without any structural change, so a bridge that uploaded them
+   * only on resize would run the crate on stale values until the next topology
+   * edit. This mirrors the GPU backend, which re-uploads the whole static
+   * neuron record each step for the same reason.
+   */
+  private uploadPerStep(buffers: SimulationBuffers, views: Views): void {
+    const { neurons } = buffers;
+    const n = neurons.count;
+    if (n === 0) return;
+    views.iExt.set(neurons.iExt.subarray(0, n));
+    views.bias.set(neurons.bias.subarray(0, n));
+    views.noise.set(neurons.noise.subarray(0, n));
+    views.neuronEnabled.set(neurons.enabled.subarray(0, n));
   }
 
   /** Copy every column the crate reads, static and state alike. */

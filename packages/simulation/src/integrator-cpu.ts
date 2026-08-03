@@ -2,6 +2,7 @@ import {
   MODEL_CODE,
   PARAM_SLOT,
   PLASTICITY_CODE,
+  RECEPTOR_CODE,
   SYNAPSE_PARAM_STRIDE,
   SYN_PARAM_SLOT,
   NEURON_PARAM_STRIDE,
@@ -61,6 +62,18 @@ function dualExponentialNorm(tauRise: number, tauDecay: number): number {
  */
 function magnesiumBlock(v: number, strength: number): number {
   return 1 / (1 + strength * 0.28 * Math.exp(-0.062 * v));
+}
+
+/**
+ * Whether a synapse's kinetics collapse to a single exponential.
+ *
+ * The dual-exponential waveform is the difference of two decaying states, so
+ * equal time constants make it identically zero for every input — the synapse
+ * would transmit nothing at all rather than transmitting sharply. In that case
+ * the rise is treated as instantaneous and only the decay state is driven.
+ */
+function isSingleExponential(tauRise: number, tauDecay: number): boolean {
+  return tauRise <= 0 || Math.abs(tauDecay - tauRise) < 1e-6;
 }
 
 /**
@@ -139,8 +152,10 @@ export class CpuIntegrator implements Integrator {
 
       // ---- 1. Deliver synaptic events whose conduction delay has elapsed ----
       drain(delays, this.cursor, time, (synapse, amplitude) => {
-        synapses.gRise[synapse] += amplitude;
         synapses.gDecay[synapse] += amplitude;
+        if (!isSingleExponential(synapses.tauRise[synapse], synapses.tauDecay[synapse])) {
+          synapses.gRise[synapse] += amplitude;
+        }
         synapses.activity[synapse] = 1;
       });
 
@@ -149,6 +164,22 @@ export class CpuIntegrator implements Integrator {
 
       for (let i = 0; i < synCount; i += 1) {
         if (synapses.enabled[i] === 0) continue;
+
+        // Electrical coupling is continuous, not event-driven: current flows
+        // whenever the two membranes differ in potential, with no presynaptic
+        // spike required. Routing gap junctions through the conductance state
+        // machine would make them silent between spikes and, with equal rise
+        // and decay constants, silent during them as well.
+        if (synapses.receptor[i] === RECEPTOR_CODE.gap) {
+          const pre = synapses.pre[i];
+          const post = synapses.post[i];
+          if (pre < neuronCount && post < neuronCount) {
+            const delta = neurons.v[pre] - neurons.v[post];
+            neurons.iSyn[post] += synapses.weight[i] * delta * gain;
+            synapses.activity[i] = Math.min(1, Math.abs(delta) * 0.02);
+          }
+          continue;
+        }
 
         const tauRise = synapses.tauRise[i];
         const tauDecay = synapses.tauDecay[i];
@@ -362,6 +393,10 @@ export class CpuIntegrator implements Integrator {
     for (let k = this.adjacency.outBegin(neuron); k < end; k += 1) {
       const s = this.adjacency.outAt(k);
       if (synapses.enabled[s] === 0) continue;
+      // Electrical synapses carry current continuously and are handled in the
+      // conductance pass; queueing a spike event for them would accumulate
+      // conductance nothing ever consumes.
+      if (synapses.receptor[s] === RECEPTOR_CODE.gap) continue;
 
       // Stochastic vesicle release.
       const p = synapses.releaseProb[s];

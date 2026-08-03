@@ -101,13 +101,26 @@ function layoutSeed(layout: PopulationLayout): number {
 /**
  * Replace any coordinate a layout could not produce.
  *
- * `layoutColumn` in `@neuroforge/physics` returns NaN for roughly half its
- * slots: its internal hash leaves the sign bit set before scaling, so the radius
- * it takes the square root of is negative about half the time. A NaN position is
- * not cosmetic — it poisons the spatial hash, every bounding box, and every
- * distance-based connectivity rule downstream — so the slots a layout failed to
- * place are resampled from the slots it managed, which preserves whatever shape
- * was asked for without this package second-guessing the layout's formula.
+ * `layoutColumn` in `@neuroforge/physics` returns NaN for almost exactly half
+ * its slots. Its internal `hash01` ends on `h ^= h >>> 16`, and XOR yields a
+ * *signed* int32, so the function returns a uniform value in [-0.5, 0.5) rather
+ * than [0, 1); `layoutColumn` takes the square root of it to get a radius, and
+ * every negative draw becomes NaN. A NaN position is not cosmetic — it poisons
+ * the spatial hash, every bounding box, and every distance-based connectivity
+ * rule downstream — so the slots the layout failed to place are resampled from
+ * the slots it managed, jittered within a fraction of their bounding box.
+ *
+ * What that buys is finiteness and a plausible arrangement, and no more. It
+ * cannot recover the layout's intent, because the surviving samples are drawn
+ * from the same truncated distribution: a column asked for radius r comes back
+ * at r*sqrt(1/2), about 71% of the requested width, and the golden-angle spiral
+ * survives only in the half of the slots that were placed. Reconstructing either
+ * would mean reimplementing the layout's formula here, which is the wrong place
+ * for it. The real fix is one character upstream — `h = (h ^ (h >>> 16)) >>> 0`
+ * — after which this function finds nothing to repair and does nothing.
+ *
+ * `layoutSphere` and `layoutDisc` use the same hash only for jitter, so they
+ * produce finite but skewed offsets that nothing here can detect.
  */
 function repairPositions(out: Float32Array, size: number, seed: number): void {
   const placed: number[] = [];

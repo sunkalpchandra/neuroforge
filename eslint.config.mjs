@@ -10,6 +10,8 @@ export default tseslint.config(
       '**/dist/**',
       '**/target/**',
       '**/pkg/**',
+      // wasm-bindgen output. Generated, gitignored, and not ours to style.
+      'packages/simulation/wasm/**',
       '**/*.config.mjs',
       '**/*.config.ts',
     ],

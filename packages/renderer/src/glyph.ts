@@ -192,7 +192,7 @@ function radialFor(level: number): number {
 }
 
 function pointsFor(level: number): number {
-  return level === 0 ? 6 : level === 1 ? 5 : 4;
+  return level === 0 ? 6 : level === 1 ? 4 : 3;
 }
 
 /** Emit `count` short twigs from a tip, each closed by a bouton. */
@@ -388,10 +388,16 @@ function growBranch(
   }
 }
 
-/** Length of the longest root-to-tip path, used to normalise `aBranchT`. */
-function totalPathLength(length: number, taper: number, depth: number): number {
+/**
+ * Sum of `taper^i` over a chain of `depth + 1` branches.
+ *
+ * `Morphology.dendriteLength` is the *total* extent of the arbor, not the length
+ * of its first branch, so the trunk has to be divided by this before it is grown
+ * or a deep archetype like purkinje would end up three times its stated size.
+ */
+function taperChain(taper: number, depth: number): number {
   let total = 0;
-  let segment = length;
+  let segment = 1;
   for (let i = 0; i <= depth; i += 1) {
     total += segment;
     segment *= taper;
@@ -806,6 +812,10 @@ export function buildDendriteGeometry(morphology: Morphology): THREE.BufferGeome
     if (trunk.depth > deepest) deepest = trunk.depth;
   }
   const taper = Math.min(0.95, Math.max(0.2, morphology.dendriteTaper));
+  // A zero-extent arbor is legal input; the floor keeps the reciprocal below
+  // finite rather than turning every branch parameter into a NaN.
+  const extent = Math.max(morphology.dendriteLength * scale, 1e-4);
+  const trunkLength = extent / taperChain(taper, deepest);
   const cfg: GrowthConfig = {
     children: style.children,
     spread: morphology.dendriteSpread,
@@ -815,8 +825,7 @@ export function buildDendriteGeometry(morphology: Morphology): THREE.BufferGeome
     droop: style.droop,
     flatten: style.flatten,
     tipRadius: style.tipRadius,
-    invTotal:
-      1 / totalPathLength(morphology.dendriteLength * scale * longest, taper, deepest),
+    invTotal: 1 / (extent * longest),
     boutons: 0,
     boutonRadius: 0,
     budget: { left: MAX_BRANCHES },
@@ -834,7 +843,7 @@ export function buildDendriteGeometry(morphology: Morphology): THREE.BufferGeome
       trunk.dx,
       trunk.dy,
       trunk.dz,
-      morphology.dendriteLength * scale * trunk.lengthScale,
+      trunkLength * trunk.lengthScale,
       somaRadius * style.trunkRadius * trunk.radiusScale,
       0,
       0,
@@ -859,7 +868,8 @@ export function buildAxonGeometry(morphology: Morphology): THREE.BufferGeometry 
   const endRadius = startRadius * 0.42;
   const boutonRadius = Math.max(endRadius * 1.9, somaRadius * 0.07);
   const twig = shaftLength * 0.12;
-  const invTotal = 1 / (shaftLength + twig * 2 + 1e-4);
+  const arms = plan.bifurcate ? shaftLength * 0.55 : 0;
+  const invTotal = 1 / (shaftLength + arms + twig + 1e-4);
 
   const cfg: GrowthConfig = {
     children: 1,

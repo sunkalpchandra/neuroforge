@@ -25,6 +25,7 @@ import {
   pyFloatList,
   pyInt,
   pyIntList,
+  pyStimulusPayload,
   pyStr,
   restingState,
 } from './common';
@@ -238,32 +239,9 @@ function stimulusTable(model: ExportCircuit): string[] {
   const rows: string[] = [];
   for (const { stimulus, targets } of model.stimuli) {
     const p = stimulus.pattern;
-    let payload: string;
-    switch (p.kind) {
-      case 'constant':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}}`;
-        break;
-      case 'step':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-      case 'pulse-train':
-        payload =
-          `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, ` +
-          `'width': ${pyFloat(p.width)}, 'start': ${pyFloat(p.start)}}`;
-        break;
-      case 'sine':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, 'offset': ${pyFloat(p.offset)}}`;
-        break;
-      case 'poisson':
-        payload = `{'rate': ${pyFloat(p.rate)}, 'amplitude': ${pyFloat(p.amplitude)}, 'seed': ${pyInt(p.seed)}}`;
-        break;
-      case 'ramp':
-        payload =
-          `{'from': ${pyFloat(p.from)}, 'to': ${pyFloat(p.to)}, ` +
-          `'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-    }
-    rows.push(`    (${pyStr(p.kind)}, ${pyIntList(targets)}, ${payload}),  # ${stimulus.name}`);
+    rows.push(
+      `    (${pyStr(p.kind)}, ${pyIntList(targets)}, ${pyStimulusPayload(p)}),  # ${stimulus.name}`,
+    );
   }
   return rows;
 }

@@ -302,6 +302,46 @@ function targetCollection(indices: readonly number[]): string {
   return `nest.NodeCollection(NEURON_IDS[${pyIntList([...indices].sort((a, b) => a - b))}].tolist())`;
 }
 
+/** One point of a `step_current_generator` schedule. */
+interface TimedValue {
+  time: number;
+  value: number;
+}
+
+/**
+ * Quantise a schedule onto the kernel grid and force it strictly increasing.
+ *
+ * `step_current_generator` rejects an `amplitude_times` list that is not
+ * strictly increasing, and quantisation alone can push two nominally distinct
+ * points onto the same step. Points are supplied in non-decreasing time order,
+ * so dropping every earlier point that is not strictly before the new one
+ * amounts to "the last value written at a given time wins" — exactly what a
+ * schedule whose pulse-off lands on the next pulse-on should mean.
+ */
+function stepSchedule(points: readonly TimedValue[], dt: number): { times: number[]; values: number[] } {
+  const times: number[] = [];
+  const values: number[] = [];
+  for (const point of points) {
+    const time = quantiseTime(finite(point.time, 0), dt, 1);
+    while (times.length > 0 && times[times.length - 1] >= time) {
+      times.pop();
+      values.pop();
+    }
+    times.push(time);
+    values.push(finite(point.value, 0));
+  }
+  return { times, values };
+}
+
+function stepCurrentGenerator(name: string, points: readonly TimedValue[], dt: number): string[] {
+  const { times, values } = stepSchedule(points, dt);
+  if (times.length === 0) return [];
+  return [
+    `${name} = nest.Create('step_current_generator', params={'amplitude_times': ${pyFloatList(times)}, ` +
+      `'amplitude_values': ${pyFloatList(values)}})`,
+  ];
+}
+
 function stimulusDevices(model: ExportCircuit, nestIndex: readonly number[]): string[] {
   const lines: string[] = [];
   let index = 0;
@@ -309,73 +349,79 @@ function stimulusDevices(model: ExportCircuit, nestIndex: readonly number[]): st
     const mapped = targets.map((t) => nestIndex[t]).filter((t) => t >= 0);
     if (mapped.length === 0) continue;
     const name = `stim_${index}`;
-    index += 1;
-    lines.push(`# stimulus ${pyStr(stimulus.name)}`);
     const p = stimulus.pattern;
+    const device: string[] = [];
     let connectSpec = '';
     switch (p.kind) {
       case 'constant':
-        lines.push(`${name} = nest.Create('dc_generator', params={'amplitude': ${pyFloat(p.amplitude)}})`);
+        device.push(`${name} = nest.Create('dc_generator', params={'amplitude': ${pyFloat(p.amplitude)}})`);
         break;
       case 'step':
-        lines.push(
+        device.push(
           `${name} = nest.Create('dc_generator', params={'amplitude': ${pyFloat(p.amplitude)}, ` +
-            `'start': ${pyFloat(p.start)}, 'stop': ${pyFloat(p.start + p.duration)}})`,
+            `'start': ${pyFloat(Math.max(0, p.start))}, ` +
+            `'stop': ${pyFloat(Math.max(0, p.start) + Math.max(0, p.duration))}})`,
         );
         break;
       case 'pulse-train': {
-        const period = 1000 / Math.max(p.frequency, 1e-9);
-        const times: number[] = [];
-        const values: number[] = [];
-        for (let t = p.start; t < model.duration; t += period) {
-          times.push(quantiseTime(t, model.dt, 1));
-          values.push(p.amplitude);
-          const off = t + Math.max(p.width, model.dt);
+        const period = 1000 / Math.max(finite(p.frequency, 10), 1e-9);
+        // A pulse at least as wide as the period leaves the current permanently
+        // on — that is what `phase < width` means in the other exporters — so
+        // the off-point is clamped to the next on-point, where `stepSchedule`
+        // discards it.
+        const width = Math.min(Math.max(finite(p.width, 1), model.dt), period);
+        const points: TimedValue[] = [];
+        for (let t = Math.max(0, p.start); t < model.duration; t += period) {
+          points.push({ time: t, value: p.amplitude });
+          const off = t + width;
           if (off >= model.duration) break;
-          times.push(quantiseTime(off, model.dt, 1));
-          values.push(0);
+          points.push({ time: off, value: 0 });
         }
-        lines.push(
-          `${name} = nest.Create('step_current_generator', params={'amplitude_times': ${pyFloatList(times)}, ` +
-            `'amplitude_values': ${pyFloatList(values)}})`,
-        );
+        device.push(...stepCurrentGenerator(name, points, model.dt));
         break;
       }
       case 'sine':
-        lines.push(
+        device.push(
           `${name} = nest.Create('ac_generator', params={'amplitude': ${pyFloat(p.amplitude)}, ` +
             `'frequency': ${pyFloat(p.frequency)}, 'offset': ${pyFloat(p.offset)}})`,
         );
         break;
       case 'poisson':
-        lines.push(
+        device.push(
           '# A Poisson current stimulus becomes a Poisson spike train whose events carry the',
           '# stimulus amplitude as their synaptic weight.',
-          `${name} = nest.Create('poisson_generator', params={'rate': ${pyFloat(p.rate)}})`,
+          `${name} = nest.Create('poisson_generator', params={'rate': ${pyFloat(Math.max(0, p.rate))}})`,
         );
         connectSpec = `, syn_spec={'weight': ${pyFloat(p.amplitude)}, 'delay': ${pyFloat(model.dt)}}`;
         break;
       case 'ramp': {
-        // step_current_generator holds each value until the next time point, so
-        // the ramp is sampled on a 1 ms grid: finer than that only bloats the
-        // script without changing the current a neuron sees.
-        const steps = Math.max(2, Math.min(512, Math.ceil(p.duration / Math.max(model.dt, 1)) + 1));
-        const times: number[] = [];
-        const values: number[] = [];
-        for (let i = 0; i < steps; i += 1) {
-          const frac = i / (steps - 1);
-          times.push(quantiseTime(p.start + frac * p.duration, model.dt, 1));
-          values.push(p.from + (p.to - p.from) * frac);
+        // A ramp of no duration injects nothing, exactly as in the other
+        // exporters, where the active window is empty.
+        if (p.duration > 0) {
+          // step_current_generator holds each value until the next time point,
+          // so the ramp is sampled on a 1 ms grid: finer than that only bloats
+          // the script without changing the current a neuron sees.
+          const steps = Math.max(2, Math.min(512, Math.ceil(p.duration / Math.max(model.dt, 1)) + 1));
+          const points: TimedValue[] = [];
+          for (let i = 0; i < steps; i += 1) {
+            const frac = i / (steps - 1);
+            points.push({
+              time: Math.max(0, p.start) + frac * p.duration,
+              value: p.from + (p.to - p.from) * frac,
+            });
+          }
+          points.push({ time: Math.max(0, p.start) + p.duration + model.dt, value: 0 });
+          device.push(...stepCurrentGenerator(name, points, model.dt));
         }
-        times.push(quantiseTime(p.start + p.duration + model.dt, model.dt, 1));
-        values.push(0);
-        lines.push(
-          `${name} = nest.Create('step_current_generator', params={'amplitude_times': ${pyFloatList(times)}, ` +
-            `'amplitude_values': ${pyFloatList(values)}})`,
-        );
         break;
       }
     }
+    // A pattern that resolves to no schedule at all creates no device, rather
+    // than a device NEST would reject.
+    if (device.length === 0) continue;
+    index += 1;
+    lines.push(`# stimulus ${pyStr(stimulus.name)}`);
+    lines.push(...device);
     lines.push(`nest.Connect(${name}, ${targetCollection(mapped)}${connectSpec})`);
     lines.push('');
   }
@@ -537,8 +583,9 @@ export function exportNest(circuit: Circuit): string {
     out.push(RULE);
     out.push('# Connections');
     out.push(RULE);
-    out.push('# nest.Connect accepts arrays of node ids with the one-to-one rule, which is the only way');
+    out.push('# nest.Connect accepts arrays of node ids with the one_to_one rule, which is the only way');
     out.push('# to express an explicit connection list in which a source appears more than once.');
+    out.push('# The rule must be passed explicitly: NEST rejects arrays of node ids under any other.');
     const partitions = partitionConnections(model, usableSynapses);
 
     // stdp_synapse and stdp_triplet_synapse read their postsynaptic trace
@@ -587,7 +634,7 @@ export function exportNest(circuit: Circuit): string {
         `'delay': ${name}_delay`,
         ...partition.scalars,
       ];
-      out.push(`nest.Connect(${name}_pre, ${name}_post, syn_spec={${spec.join(', ')}})`);
+      out.push(`nest.Connect(${name}_pre, ${name}_post, 'one_to_one', syn_spec={${spec.join(', ')}})`);
       out.push('');
     }
   }

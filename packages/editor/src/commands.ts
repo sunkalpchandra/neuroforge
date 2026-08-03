@@ -164,12 +164,6 @@ export class History {
     return this.#redo.length;
   }
 
-  /** Label of the entry the next undo would revert, or null. */
-  get undoLabel(): string | null {
-    const top = this.#undo[this.#undo.length - 1];
-    return top === undefined ? null : top.label;
-  }
-
   clear(): void {
     this.#undo.length = 0;
     this.#redo.length = 0;

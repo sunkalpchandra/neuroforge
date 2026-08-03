@@ -10,7 +10,6 @@ dist/
 .env*.local
 target/
 crates/**/pkg/
-packages/simulation/wasm/
 coverage/
 *.log
 npm-debug.log*

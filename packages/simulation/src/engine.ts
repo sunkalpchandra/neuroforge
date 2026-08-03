@@ -19,6 +19,7 @@ import type {
 } from '@neuroforge/shared';
 import { Rng } from '@neuroforge/math';
 
+import { createIntegrator } from './backend';
 import { CpuIntegrator } from './integrator-cpu';
 import { applyStimuli } from './stimuli';
 import { EMPTY_STEP_RESULT } from './types';
@@ -51,6 +52,32 @@ export class SimulationEngine {
 
   /** Unconsumed simulated milliseconds carried between frames. */
   private accumulator = 0;
+
+  /**
+   * Device offered to GPU backends. `undefined` means none has been offered and
+   * `createIntegrator` may acquire its own; `null` means the app has told us
+   * there is no device, and GPU is skipped without probing for one.
+   */
+  private device: GPUDevice | null | undefined = undefined;
+
+  /** Guards against an earlier backend swap resolving after a later one. */
+  private backendGeneration = 0;
+
+  private disposed = false;
+
+  /**
+   * Charge injected by `poke` since the last step, in pA.
+   *
+   * It cannot live in `iExt` alone: `applyStimuli` clears that column at the top
+   * of every step, so a poke written straight into it is erased before any
+   * integrator sees it. Held here, it is re-applied after the clear and consumed
+   * by exactly one step, which is what makes it a pulse.
+   */
+  private pokeCharge = new Float32Array(0);
+  private pokePending = false;
+
+  /** Stimulus slot lookup, bound once so the step path allocates no closure. */
+  private readonly lookupSlot = (id: string): number => this.slotOf(id);
 
   /** Wall-clock milliseconds of simulated time in the last second, for the FPS readout. */
   private lastFrameAt = 0;
@@ -192,6 +219,7 @@ export class SimulationEngine {
     this.integrator.invalidate?.();
     this.integrator.reset(this._buffers);
     this.accumulator = 0;
+    this.clearPokes();
     this.refreshCounts();
   }
 
@@ -216,8 +244,14 @@ export class SimulationEngine {
   reset(): void {
     this.integrator.reset(this._buffers);
     this.accumulator = 0;
+    this.clearPokes();
     this.rng = new Rng(this._settings.seed);
     this._stats = { ...this._stats, simTime: 0, spikes: 0, meanRate: 0 };
+  }
+
+  private clearPokes(): void {
+    this.pokeCharge.fill(0);
+    this.pokePending = false;
   }
 
   /** Structural edit happened; drop any cached derivation of the topology. */
@@ -263,11 +297,12 @@ export class SimulationEngine {
     applyStimuli(
       this._buffers,
       this.stimuli,
-      (id) => this.slotOf(id),
+      this.lookupSlot,
       this._buffers.time,
       this.rng,
       this._settings.dt,
     );
+    this.drainPokes();
 
     const result = this.integrator.step(this._buffers, this._settings, steps);
     this._buffers.step += result.steps;
@@ -307,8 +342,33 @@ export class SimulationEngine {
 
   /** Inject a brief current into one neuron, used by the poke tool. */
   poke(slot: number, amplitude: number): void {
-    if (slot < 0 || slot >= this._buffers.neurons.count) return;
-    this._buffers.neurons.iExt[slot] += amplitude;
+    const neurons = this._buffers.neurons;
+    if (slot < 0 || slot >= neurons.count) return;
+    if (this.pokeCharge.length < neurons.capacity) {
+      const next = new Float32Array(neurons.capacity);
+      next.set(this.pokeCharge);
+      this.pokeCharge = next;
+    }
+    this.pokeCharge[slot] += amplitude;
+    this.pokePending = true;
+    // Also written straight through so a poke while paused is visible to the
+    // inspector immediately, rather than only once the clock is running.
+    neurons.iExt[slot] += amplitude;
+  }
+
+  /** Fold pending pokes into `iExt` after `applyStimuli` has cleared it. */
+  private drainPokes(): void {
+    if (!this.pokePending) return;
+    const { iExt } = this._buffers.neurons;
+    const count = Math.min(this._buffers.neurons.count, this.pokeCharge.length);
+    for (let i = 0; i < count; i += 1) {
+      const charge = this.pokeCharge[i];
+      if (charge === 0) continue;
+      iExt[i] += charge;
+      this.pokeCharge[i] = 0;
+    }
+    this.pokeCharge.fill(0, count);
+    this.pokePending = false;
   }
 
   /**
@@ -324,7 +384,47 @@ export class SimulationEngine {
     this.refreshCounts();
   }
 
+  /**
+   * Choose a compute backend, falling back down the chain when the preference is
+   * unavailable. The preference is recorded in the settings either way, so the
+   * document keeps asking for the backend the user wanted even on a machine that
+   * cannot provide it.
+   */
+  async setBackend(preference: SimulationSettings['backend']): Promise<void> {
+    this._settings = { ...this._settings, backend: preference };
+    await this.adoptBackend(preference);
+  }
+
+  /**
+   * Hand the renderer's `GPUDevice` to the engine, or `null` to say there is
+   * none. Sharing the device the app already owns is what stops the GPU backend
+   * from acquiring a second one; passing null keeps it from probing at all.
+   */
+  async attachDevice(device: GPUDevice | null): Promise<void> {
+    if (device === this.device) return;
+    this.device = device;
+    await this.adoptBackend(this._settings.backend);
+  }
+
+  /**
+   * Resolve a preference into an integrator and install it.
+   *
+   * Backend selection is asynchronous, so two overlapping requests can resolve
+   * out of order; the generation stamp drops every result but the newest and
+   * disposes the integrator it was about to install rather than leaking it.
+   */
+  private async adoptBackend(preference: SimulationSettings['backend']): Promise<void> {
+    const generation = (this.backendGeneration += 1);
+    const next = await createIntegrator(preference, this.device);
+    if (generation !== this.backendGeneration || this.disposed) {
+      next.dispose();
+      return;
+    }
+    await this.setIntegrator(next);
+  }
+
   dispose(): void {
+    this.disposed = true;
     this.integrator.dispose();
     this._running = false;
   }

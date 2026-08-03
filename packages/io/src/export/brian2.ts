@@ -30,6 +30,7 @@ import {
   pyFloatList,
   pyInt,
   pyIntList,
+  pyStimulusPayload,
   pyStr,
 } from './common';
 import type { ExportChannel, ExportCircuit, ExportGroup, ExportSynapse } from './common';
@@ -578,32 +579,9 @@ function stimulusEntries(model: ExportCircuit, group: ExportGroup): string[] {
       .map((index) => index - group.offset);
     if (local.length === 0) continue;
     const p = stimulus.pattern;
-    let payload: string;
-    switch (p.kind) {
-      case 'constant':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}}`;
-        break;
-      case 'step':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-      case 'pulse-train':
-        payload =
-          `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, ` +
-          `'width': ${pyFloat(p.width)}, 'start': ${pyFloat(p.start)}}`;
-        break;
-      case 'sine':
-        payload = `{'amplitude': ${pyFloat(p.amplitude)}, 'frequency': ${pyFloat(p.frequency)}, 'offset': ${pyFloat(p.offset)}}`;
-        break;
-      case 'poisson':
-        payload = `{'rate': ${pyFloat(p.rate)}, 'amplitude': ${pyFloat(p.amplitude)}, 'seed': ${pyInt(p.seed)}}`;
-        break;
-      case 'ramp':
-        payload =
-          `{'from': ${pyFloat(p.from)}, 'to': ${pyFloat(p.to)}, ` +
-          `'start': ${pyFloat(p.start)}, 'duration': ${pyFloat(p.duration)}}`;
-        break;
-    }
-    entries.push(`    (${pyStr(p.kind)}, ${pyIntList(local)}, ${payload}),  # ${stimulus.name}`);
+    entries.push(
+      `    (${pyStr(p.kind)}, ${pyIntList(local)}, ${pyStimulusPayload(p)}),  # ${stimulus.name}`,
+    );
   }
   return entries;
 }

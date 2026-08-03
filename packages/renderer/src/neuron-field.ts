@@ -135,6 +135,9 @@ export class NeuronField extends THREE.Group {
   readonly #library: GlyphLibrary;
   readonly #materials: THREE.ShaderMaterial[] = [];
   readonly #groups = new Map<number, FieldGroup>();
+  /** Same groups as `#groups`, in a form a frame loop can walk without a Map
+   * iterator; iterating a Map allocates, and this runs twice per frame. */
+  readonly #order: FieldGroup[] = [];
   readonly #counts = new Map<number, number>();
   readonly #seeds = new Map<number, number>();
 
@@ -195,6 +198,9 @@ export class NeuronField extends THREE.Group {
       this.#groups.set(key, this.#createGroup(key, this.#seeds.get(key) ?? 0, needed));
     }
 
+    this.#order.length = 0;
+    for (const group of this.#groups.values()) this.#order.push(group);
+
     for (let i = 0; i < count; i += 1) {
       const key = variantKey(neurons.archetype[i], variantOf(neurons.seed[i]));
       const group = this.#groups.get(key);
@@ -227,9 +233,10 @@ export class NeuronField extends THREE.Group {
       uniforms.uFogDensity.value = settings.fogDensity;
     }
 
-    for (const group of this.#groups.values()) {
-      group.meshes[PART_DENDRITES].visible = settings.showDendrites;
-      group.meshes[PART_AXON].visible = settings.showAxons;
+    for (let g = 0; g < this.#order.length; g += 1) {
+      const meshes = this.#order[g].meshes;
+      meshes[PART_DENDRITES].visible = settings.showDendrites;
+      meshes[PART_AXON].visible = settings.showAxons;
     }
 
     this.#writeInstances(buffers, dt);
@@ -262,6 +269,7 @@ export class NeuronField extends THREE.Group {
   dispose(): void {
     for (const group of this.#groups.values()) this.#destroyGroup(group);
     this.#groups.clear();
+    this.#order.length = 0;
     for (const material of this.#materials) material.dispose();
     this.#materials.length = 0;
     this.#hash = null;
@@ -281,7 +289,8 @@ export class NeuronField extends THREE.Group {
     const envelope = this.#envelope;
     const decay = dt > 0 ? Math.exp(-dt / FLASH_TAU) : 1;
 
-    for (const group of this.#groups.values()) {
+    for (let g = 0; g < this.#order.length; g += 1) {
+      const group = this.#order[g];
       const slots = group.slots;
       const total = group.count;
       const offsetArray = group.pool.offset.array as Float32Array;

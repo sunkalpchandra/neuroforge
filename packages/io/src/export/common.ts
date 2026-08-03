@@ -21,6 +21,7 @@ import type {
   ReceptorKinetics,
   ShortTermPlasticity,
   Stimulus,
+  StimulusPattern,
   Synapse,
 } from '@neuroforge/shared';
 
@@ -655,6 +656,61 @@ export function pyFloatList(values: readonly number[], perLine = 8, indentWidth 
 
 export function pyIntList(values: readonly number[], perLine = 16, indentWidth = 4): string {
   return wrapItems(values.map(pyInt), perLine, indentWidth);
+}
+
+/**
+ * Smallest stimulus frequency an exporter will emit, in Hz.
+ *
+ * Every generated `build_stimulus` turns a frequency into a period with
+ * `1000.0 / frequency`, so a zero frequency would divide by zero at runtime.
+ * A document that reaches an exporter without going through `migrateCircuit`
+ * carries no such guarantee, hence the floor here.
+ */
+const MIN_STIMULUS_FREQUENCY = 1e-6;
+
+/**
+ * A stimulus pattern as a Python dict literal.
+ *
+ * Shared by the Brian2, PyTorch and NumPy targets so that their three
+ * `build_stimulus` implementations are fed byte-for-byte identical parameters.
+ */
+export function pyStimulusPayload(pattern: StimulusPattern): string {
+  switch (pattern.kind) {
+    case 'constant':
+      return `{'amplitude': ${pyFloat(finite(pattern.amplitude, 0))}}`;
+    case 'step':
+      return (
+        `{'amplitude': ${pyFloat(finite(pattern.amplitude, 0))}, ` +
+        `'start': ${pyFloat(Math.max(0, finite(pattern.start, 0)))}, ` +
+        `'duration': ${pyFloat(Math.max(0, finite(pattern.duration, 0)))}}`
+      );
+    case 'pulse-train':
+      return (
+        `{'amplitude': ${pyFloat(finite(pattern.amplitude, 0))}, ` +
+        `'frequency': ${pyFloat(Math.max(MIN_STIMULUS_FREQUENCY, finite(pattern.frequency, 10)))}, ` +
+        `'width': ${pyFloat(Math.max(0, finite(pattern.width, 1)))}, ` +
+        `'start': ${pyFloat(Math.max(0, finite(pattern.start, 0)))}}`
+      );
+    case 'sine':
+      return (
+        `{'amplitude': ${pyFloat(finite(pattern.amplitude, 0))}, ` +
+        `'frequency': ${pyFloat(Math.max(0, finite(pattern.frequency, 10)))}, ` +
+        `'offset': ${pyFloat(finite(pattern.offset, 0))}}`
+      );
+    case 'poisson':
+      return (
+        `{'rate': ${pyFloat(Math.max(0, finite(pattern.rate, 0)))}, ` +
+        `'amplitude': ${pyFloat(finite(pattern.amplitude, 0))}, ` +
+        `'seed': ${pyInt(pattern.seed)}}`
+      );
+    case 'ramp':
+      return (
+        `{'from': ${pyFloat(finite(pattern.from, 0))}, ` +
+        `'to': ${pyFloat(finite(pattern.to, 0))}, ` +
+        `'start': ${pyFloat(Math.max(0, finite(pattern.start, 0)))}, ` +
+        `'duration': ${pyFloat(Math.max(0, finite(pattern.duration, 0)))}}`
+      );
+  }
 }
 
 /** Indent every line of a block by `spaces`, leaving blank lines empty. */

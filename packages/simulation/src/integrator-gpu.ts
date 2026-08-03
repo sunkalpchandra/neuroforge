@@ -485,6 +485,11 @@ export class GpuIntegrator implements Integrator {
   private ringSlots = 0;
   private ringCursor = 0;
 
+  /** Cached longest conduction delay, and the topology it was measured on. */
+  private longestDelay = 0;
+  private delayScanVersion = -1;
+  private delayScanCount = -1;
+
   /** Bumped whenever GPU state is re-initialised; fences in-flight readbacks. */
   private epoch = 0;
 
