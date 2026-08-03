@@ -418,6 +418,28 @@ export interface SpectrumResult {
   totalPower: number;
   /** Share of the in-band power held by the band the peak falls in. */
   dominantShare: number;
+  /** Peak power divided by the median power across the search band. */
+  prominence: number;
+  /**
+   * Prominence a spectrally flat record of this length would be expected to
+   * reach anyway. A peak below it is the largest of a set of noise bins, not a
+   * rhythm. See `flatProminence`.
+   */
+  flatProminence: number;
+}
+
+/**
+ * Expected peak-to-median ratio of a periodogram with no rhythm in it.
+ *
+ * The bins of a periodogram of a stationary noise process are exponentially
+ * distributed, so the largest of `n` of them averages (ln n + γ) times the mean
+ * while the median is ln 2 times the mean. Anything at or below this ratio is
+ * what a purely asynchronous population produces on its own, which is why a
+ * dominant frequency alone is never enough to claim an oscillation.
+ */
+function flatProminenceFor(independentBins: number): number {
+  const n = Math.max(2, independentBins);
+  return (Math.log(n) + 0.5772156649) / Math.LN2;
 }
 
 function nextPowerOfTwo(n: number): number {
@@ -438,6 +460,8 @@ const EMPTY_SPECTRUM: SpectrumResult = {
   bands: FREQUENCY_BANDS.map((band) => ({ band, power: 0, share: 0 })),
   totalPower: 0,
   dominantShare: 0,
+  prominence: 0,
+  flatProminence: 0,
 };
 
 /**
@@ -488,6 +512,19 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
   const band = dominantHz > 0 ? bandFor(dominantHz) : null;
   const bandIndex = band === null ? -1 : bandIndexFor(dominantHz);
 
+  // Median rather than mean: one strong rhythm would drag a mean upward and
+  // hide itself, which is the opposite of what this ratio is for.
+  const searched = power.slice(first, last + 1).sort();
+  const median =
+    searched.length === 0
+      ? 0
+      : searched.length % 2 === 1
+        ? searched[(searched.length - 1) >> 1]
+        : (searched[searched.length / 2 - 1] + searched[searched.length / 2]) / 2;
+  // Zero padding multiplies the bin count without adding information, so the
+  // count of genuinely independent bins is scaled back by the padding factor.
+  const independentBins = (searched.length * m) / nfft;
+
   return {
     power,
     binHz,
@@ -500,6 +537,8 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
     bands,
     totalPower,
     dominantShare: bandIndex >= 0 && totalPower > 0 ? accumulated[bandIndex] / totalPower : 0,
+    prominence: median > 0 ? power[peakBin] / median : 0,
+    flatProminence: flatProminenceFor(independentBins),
   };
 }
 
@@ -877,6 +916,15 @@ function spectrumWarnings(summary: RunSummary, spectrum: SpectrumResult, what: s
       `The peak at ${spectrum.dominantHz.toFixed(1)} Hz is within two bins of this record's ${spectrum.resolutionHz.toFixed(1)} Hz resolution — record for longer before believing it.`,
     );
   }
+  if (
+    summary.spikes >= MIN_SPECTRUM_SPIKES &&
+    spectrum.prominence > 0 &&
+    spectrum.prominence < spectrum.flatProminence
+  ) {
+    warnings.push(
+      `The ${what} peak is only ${spectrum.prominence.toFixed(1)}× the median power of the band it sits in, and a spectrally flat record this long reaches ${spectrum.flatProminence.toFixed(1)}× on its own. This population is firing asynchronously; the dominant frequency is the largest of a set of noise bins, not a rhythm.`,
+    );
+  }
   return warnings;
 }
 
@@ -1106,6 +1154,7 @@ export async function runLesion(
 
   const warnings = [...circuitWarnings(circuit)];
   warnings.push(...spectrumWarnings(control.summary, control.spectrum, 'control'));
+  warnings.push(...spectrumWarnings(lesioned.summary, lesioned.spectrum, 'lesioned'));
   if (noisy(circuit)) {
     warnings.push(
       'This network has per-cell noise. Both runs start from the same seed, but a disabled cell draws no noise, so the two noise streams separate after the first ablated cell — treat small differences as noise, not as effect.',

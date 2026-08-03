@@ -956,6 +956,7 @@ function readRender(report: Report, value: unknown, path: string): RenderSetting
     // Documents written before cell-identity colouring existed carry none of
     // these; falling back to the defaults is the migration, and silently, since
     // an absent field here is expected rather than a defect in the file.
+    showSynapses: bool(report, value.showSynapses, `${path}.showSynapses`, d.showSynapses),
     colorMode: enumOf(report, value.colorMode, `${path}.colorMode`, COLOR_MODES, d.colorMode),
     dimUnselected: num(report, value.dimUnselected, `${path}.dimUnselected`, d.dimUnselected, {
       min: 0,

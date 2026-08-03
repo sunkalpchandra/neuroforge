@@ -186,8 +186,15 @@ export interface TauResult {
   onsetIndex: number;
   tauMs: number;
   baselineMv: number;
+  /** Level the cell actually settles at by the end of the step. */
   steadyMv: number;
   deflectionMv: number;
+  /** Asymptote of the fitted component, which is not the final level when a
+   * slower process pulls the membrane back afterwards. */
+  fitOffsetMv: number;
+  fitAmplitudeMv: number;
+  /** Extent of the window the fit was taken over, from step onset (ms). */
+  fitWindowMs: number;
   fitR2: number;
   fitPoints: number;
   /** cm/gL where the model defines it, else null. */
@@ -758,14 +765,159 @@ function analyticTau(params: NeuronParams): number | null {
   return null;
 }
 
+interface DecayFit {
+  tauMs: number;
+  amplitudeMv: number;
+  offsetMv: number;
+  r2: number;
+  n: number;
+  windowMs: number;
+}
+
+/** Samples the decay fit is decimated to; more buys no precision worth its cost. */
+const MAX_FIT_SAMPLES = 2048;
+/** Fewest samples a window may contain and still be fitted. */
+const MIN_FIT_SAMPLES = 32;
+/** Golden-section reduction factor. */
+const GOLDEN = (Math.sqrt(5) - 1) / 2;
+
+/**
+ * Closed-form least squares for A and C in v ≈ A·exp(-t/τ) with τ fixed.
+ *
+ * Holding τ makes the model linear in its two remaining parameters, so the whole
+ * search is one dimensional and the inner solve is a 2x2 system rather than an
+ * iteration.
+ */
+function solveDecay(
+  ts: Float64Array,
+  vs: Float64Array,
+  tau: number,
+): { sse: number; amplitude: number; offset: number } | null {
+  const n = ts.length;
+  if (n < 3 || !(tau > 0)) return null;
+  let se = 0;
+  let see = 0;
+  let sv = 0;
+  let sev = 0;
+  let svv = 0;
+  for (let i = 0; i < n; i += 1) {
+    const e = Math.exp(-ts[i] / tau);
+    const y = vs[i];
+    se += e;
+    see += e * e;
+    sv += y;
+    sev += e * y;
+    svv += y * y;
+  }
+  const det = n * see - se * se;
+  // A τ far longer than the window makes exp(-t/τ) indistinguishable from the
+  // constant term, and the normal equations become singular.
+  if (!(Math.abs(det) > 1e-12)) return null;
+  const amplitude = (n * sev - se * sv) / det;
+  const offset = (see * sv - se * sev) / det;
+  const sse = svv - amplitude * sev - offset * sv;
+  return { sse: sse > 0 ? sse : 0, amplitude, offset };
+}
+
+/**
+ * Fit v(t) = A·exp(-t/τ) + C over a slice of the trace.
+ *
+ * The asymptote is *fitted* rather than measured off the tail, which matters
+ * more than it sounds: membrane voltage is stored as float32, so once the
+ * remaining deviation falls below an ULP the trace stops moving several
+ * microvolts short of its true asymptote. Subtracting that stalled value and
+ * fitting in the log domain bends the line and reads τ several percent low.
+ */
+function fitDecay(
+  traceT: Float32Array,
+  traceV: Float32Array,
+  from: number,
+  to: number,
+): DecayFit | null {
+  const span = to - from;
+  if (span < MIN_FIT_SAMPLES) return null;
+  const stride = Math.max(1, Math.ceil(span / MAX_FIT_SAMPLES));
+  const n = Math.floor((span + stride - 1) / stride);
+  const ts = new Float64Array(n);
+  const vs = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const at = from + i * stride;
+    ts[i] = traceT[at];
+    vs[i] = traceV[at];
+  }
+
+  const windowMs = traceT[to - 1];
+  const lowTau = Math.max(1e-3, windowMs / 1000);
+  const highTau = Math.max(lowTau * 10, windowMs * 4);
+  const scan = 96;
+  const ratio = (highTau / lowTau) ** (1 / scan);
+
+  let bestTau = lowTau;
+  let bestSse = Infinity;
+  for (let i = 0; i <= scan; i += 1) {
+    const tau = lowTau * ratio ** i;
+    const solved = solveDecay(ts, vs, tau);
+    if (solved === null || solved.sse >= bestSse) continue;
+    bestSse = solved.sse;
+    bestTau = tau;
+  }
+  if (!Number.isFinite(bestSse)) return null;
+
+  // Golden section over log τ inside the bracket the scan singled out.
+  let lo = Math.log(bestTau / ratio);
+  let hi = Math.log(bestTau * ratio);
+  const cost = (logTau: number): number => {
+    const solved = solveDecay(ts, vs, Math.exp(logTau));
+    return solved === null ? Infinity : solved.sse;
+  };
+  let c = hi - GOLDEN * (hi - lo);
+  let d = lo + GOLDEN * (hi - lo);
+  let fc = cost(c);
+  let fd = cost(d);
+  for (let i = 0; i < 60 && hi - lo > 1e-9; i += 1) {
+    if (fc < fd) {
+      hi = d;
+      d = c;
+      fd = fc;
+      c = hi - GOLDEN * (hi - lo);
+      fc = cost(c);
+    } else {
+      lo = c;
+      c = d;
+      fc = fd;
+      d = lo + GOLDEN * (hi - lo);
+      fd = cost(d);
+    }
+  }
+
+  const tau = Math.exp((lo + hi) / 2);
+  const solved = solveDecay(ts, vs, tau);
+  if (solved === null) return null;
+
+  let mean = 0;
+  for (let i = 0; i < n; i += 1) mean += vs[i];
+  mean /= n;
+  let sst = 0;
+  for (let i = 0; i < n; i += 1) sst += (vs[i] - mean) ** 2;
+
+  return {
+    tauMs: tau,
+    amplitudeMv: solved.amplitude,
+    offsetMv: solved.offset,
+    r2: sst > 0 ? Math.max(0, 1 - solved.sse / sst) : 1,
+    n,
+    windowMs,
+  };
+}
+
 /**
  * Membrane time constant from the decay of a small hyperpolarising step.
  *
- * The steady level is measured first and subtracted, then the remaining
- * deviation is fitted in the log domain, which turns the exponential into a
- * straight line and makes the fit a single least-squares pass rather than an
- * iterative solve. Samples below 2% of the deflection are dropped: they carry
- * almost no information about the slope but plenty of float noise.
+ * The fit window runs from the step onset to the peak of the deflection rather
+ * than to the end of the step. Anything past the peak is a slower process
+ * dragging the membrane back — AdEx's subthreshold adaptation conductance is
+ * exactly this — and including it makes a single exponential describe two, which
+ * is how a 9 ms membrane comes to be reported as 86 ms.
  */
 export async function runMembraneTau(
   circuit: Circuit,
@@ -852,36 +1004,57 @@ export async function runMembraneTau(
     );
   }
 
-  const y0 = Math.abs(baselineMv - steadyMv);
-  const floor = y0 * 0.02;
-  const ts: number[] = [];
-  const logs: number[] = [];
+  // The extremum of the deflection is where charging stops and any slower
+  // process takes over, so it is the natural right edge of the fit window.
+  let peakIndex = onsetIndex;
+  let peakDeviation = 0;
   for (let i = onsetIndex; i < traceV.length; i += 1) {
-    const deviation = Math.abs(traceV[i] - steadyMv);
-    if (deviation <= floor || deviation > y0) continue;
-    ts.push(traceT[i]);
-    logs.push(Math.log(deviation));
+    const deviation = Math.abs(traceV[i] - baselineMv);
+    if (deviation > peakDeviation) {
+      peakDeviation = deviation;
+      peakIndex = i;
+    }
   }
 
-  const fit = linearFit(ts, logs);
-  if (fit === null || !(fit.slope < 0)) {
+  const dt = clamp(params.dt, MIN_DT, MAX_DT);
+  const peakEnd = Math.min(
+    traceV.length,
+    Math.max(onsetIndex + MIN_FIT_SAMPLES, peakIndex + 1),
+  );
+
+  let fit = fitDecay(traceT, traceV, onsetIndex, peakEnd);
+  if (fit !== null) {
+    // Five time constants captures better than 99% of the decay; anything past
+    // that is the asymptote repeating itself and only dilutes the fit.
+    const refined = Math.min(
+      peakEnd,
+      onsetIndex + Math.max(MIN_FIT_SAMPLES, stepsFor(5 * fit.tauMs, dt)),
+    );
+    if (refined !== peakEnd) {
+      const next = fitDecay(traceT, traceV, onsetIndex, refined);
+      if (next !== null) fit = next;
+    }
+  }
+
+  if (fit === null || Math.abs(fit.amplitudeMv) < Math.abs(deflectionMv) * 0.02) {
     throw new ProtocolError(
-      'The response did not decay monotonically toward a steady level, so no single time constant describes it.',
+      'No exponential component could be resolved in the response. Lengthen the step, reduce dt, or increase the amplitude.',
     );
   }
 
-  const tauMs = -1 / fit.slope;
+  const tauMs = fit.tauMs;
   const analytic = analyticTau(neuron.params);
   const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
 
   const csv = [
     ...csvHeader(meta, 'Membrane time constant', [
       `step: ${csvNumber(params.amplitudePa)} pA for ${csvNumber(params.stepMs)} ms`,
-      `tau: ${csvNumber(tauMs)} ms (r2 ${csvNumber(fit.r2)}, ${fit.n} points)`,
+      `tau: ${csvNumber(tauMs)} ms (r2 ${csvNumber(fit.r2)}, ${fit.n} samples over the first ${csvNumber(fit.windowMs)} ms)`,
       analytic === null
         ? 'analytic cm/gL: not defined for this model'
         : `analytic cm/gL: ${csvNumber(analytic)} ms`,
       `baseline: ${csvNumber(baselineMv)} mV, steady: ${csvNumber(steadyMv)} mV`,
+      `fitted asymptote: ${csvNumber(fit.offsetMv)} mV, amplitude: ${csvNumber(fit.amplitudeMv)} mV`,
     ]),
     'time_ms,voltage_mV',
     ...Array.from(traceT, (t, i) => `${csvNumber(t)},${csvNumber(traceV[i])}`),
@@ -898,6 +1071,9 @@ export async function runMembraneTau(
     baselineMv,
     steadyMv,
     deflectionMv,
+    fitOffsetMv: fit.offsetMv,
+    fitAmplitudeMv: fit.amplitudeMv,
+    fitWindowMs: fit.windowMs,
     fitR2: fit.r2,
     fitPoints: fit.n,
     analyticTauMs: analytic,

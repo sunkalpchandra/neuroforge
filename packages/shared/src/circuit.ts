@@ -151,6 +151,8 @@ export interface RenderSettings {
   showDendrites: boolean;
   showAxons: boolean;
   showParticles: boolean;
+  /** Draw a marker at each synaptic contact site. */
+  showSynapses: boolean;
   particleDensity: number;
   neuronScale: number;
   /** Renders voltage as a colour ramp rather than a flat accent. */
@@ -191,6 +193,7 @@ export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
   showDendrites: true,
   showAxons: true,
   showParticles: true,
+  showSynapses: true,
   particleDensity: 1,
   neuronScale: 1,
   voltageColoring: false,

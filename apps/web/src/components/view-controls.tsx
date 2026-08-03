@@ -21,6 +21,7 @@ import { ColorLegend } from './color-legend';
 const LAYERS: { key: keyof RenderSettings; label: string }[] = [
   { key: 'showDendrites', label: 'Dendrites' },
   { key: 'showAxons', label: 'Axons' },
+  { key: 'showSynapses', label: 'Synapses' },
   { key: 'showParticles', label: 'Impulses' },
   { key: 'gridVisible', label: 'Grid' },
 ];

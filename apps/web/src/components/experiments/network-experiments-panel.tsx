@@ -144,12 +144,18 @@ interface PerturbationState {
   seed: number;
 }
 
-const DEFAULT_RHYTHM: RhythmState = { durationMs: 1500, warmupMs: 200, binMs: 1, seed: 1 };
+/**
+ * Defaults are sized so a first run finishes in a couple of seconds on a small
+ * circuit while still resolving the delta band: a 1200 ms record puts the
+ * frequency resolution below 1 Hz, which is the shortest record that can say
+ * anything about a 1–4 Hz rhythm at all.
+ */
+const DEFAULT_RHYTHM: RhythmState = { durationMs: 1200, warmupMs: 200, binMs: 1, seed: 1 };
 
 const DEFAULT_LESION: LesionState = {
   target: 'hubs',
   size: 8,
-  durationMs: 1000,
+  durationMs: 800,
   warmupMs: 200,
   binMs: 1,
   seed: 1,
@@ -161,18 +167,18 @@ const DEFAULT_TRANSFER: TransferState = {
   outputExcludesInput: true,
   minRateHz: 0,
   maxRateHz: 120,
-  levels: 7,
+  levels: 6,
   amplitudePa: 400,
-  durationMs: 400,
-  warmupMs: 150,
+  durationMs: 300,
+  warmupMs: 120,
   seed: 1,
 };
 
 const DEFAULT_PERTURBATION: PerturbationState = {
   useSelection: true,
   amplitudePa: 6000,
-  warmupMs: 300,
-  durationMs: 400,
+  warmupMs: 250,
+  durationMs: 350,
   sampleMs: 2,
   seed: 1,
 };
@@ -386,6 +392,15 @@ export function NetworkExperimentsPanel({
     [select],
   );
 
+  // A failure or a cancellation belongs to the protocol that produced it; the
+  // badge and the error line would otherwise follow the user to a protocol they
+  // never ran. A run in flight keeps its status, because it is still running.
+  const chooseProtocol = useCallback((next: ProtocolKey) => {
+    setProtocol(next);
+    setStatus((current) => (current === 'running' ? current : 'idle'));
+    setError(null);
+  }, []);
+
   if (!open) return null;
 
   const running = status === 'running';
@@ -432,52 +447,57 @@ export function NetworkExperimentsPanel({
 
       <ScrollArea className="min-h-0 flex-1">
         <PanelSection label="Protocol" flush>
-          <ul role="radiogroup" aria-label="Experiment protocol" className="flex flex-col gap-px">
+          {/* Toggle buttons rather than a radiogroup: a radiogroup owes the user
+              arrow-key roving focus, and plain tab order is the honest thing to
+              expose for four rows that are each independently reachable. */}
+          <div role="group" aria-label="Experiment protocol" className="flex flex-col gap-px">
             {PROTOCOLS.map((entry) => {
               const Icon = entry.icon;
               const active = entry.key === protocol;
               return (
-                <li key={entry.key}>
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    onClick={() => setProtocol(entry.key)}
-                    className={cn(
-                      'relative flex w-full items-start gap-2 rounded-control px-1.5 py-1 text-left transition-colors',
-                      'hover:bg-panel-raised focus-visible:bg-panel-raised',
-                      active && 'bg-white/[0.07]',
-                    )}
-                  >
-                    <Icon
-                      size={11}
+                <button
+                  key={entry.key}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => chooseProtocol(entry.key)}
+                  className={cn(
+                    'relative flex w-full items-start gap-2 rounded-control px-1.5 py-1 text-left transition-colors',
+                    'hover:bg-panel-raised focus-visible:bg-panel-raised',
+                    active && 'bg-white/[0.07]',
+                  )}
+                >
+                  {/* Accent rule on the active row, so the selection reads at a
+                      glance without a control-sized affordance. */}
+                  {active ? (
+                    <span
                       aria-hidden
-                      className={cn(
-                        'mt-[3px] shrink-0',
-                        active ? 'text-accent' : 'text-ink-faint',
-                      )}
+                      className="absolute inset-y-1 left-0 w-px rounded-full bg-accent"
                     />
-                    <span className="flex min-w-0 flex-col">
-                      <span
-                        className={cn('truncate text-[11px]', active ? 'text-ink' : 'text-ink-muted')}
-                      >
-                        {entry.name}
-                      </span>
-                      <span className="text-[9.5px] leading-tight text-ink-faint">
-                        {entry.blurb}
-                      </span>
+                  ) : null}
+                  <Icon
+                    size={11}
+                    aria-hidden
+                    className={cn('mt-[3px] shrink-0', active ? 'text-accent' : 'text-ink-faint')}
+                  />
+                  <span className="flex min-w-0 flex-col">
+                    <span
+                      className={cn('truncate text-[11px]', active ? 'text-ink' : 'text-ink-muted')}
+                    >
+                      {entry.name}
                     </span>
-                    {results[entry.key] !== undefined ? (
-                      <span
-                        aria-hidden
-                        className="mt-[5px] ml-auto size-1.5 shrink-0 rounded-full bg-success/80"
-                      />
-                    ) : null}
-                  </button>
-                </li>
+                    <span className="text-[9.5px] leading-tight text-ink-faint">{entry.blurb}</span>
+                  </span>
+                  {results[entry.key] !== undefined ? (
+                    <span
+                      aria-hidden
+                      title="Measured"
+                      className="mt-[5px] ml-auto size-1.5 shrink-0 rounded-full bg-success/80"
+                    />
+                  ) : null}
+                </button>
               );
             })}
-          </ul>
+          </div>
         </PanelSection>
 
         <Separator />
@@ -614,12 +634,25 @@ function ParamRow({
   children: React.ReactNode;
 }) {
   return (
-    <Tooltip content={hint} side="left">
-      <div className={cn('flex min-w-0 items-center gap-2', disabled && 'pointer-events-none opacity-45')}>
-        <span className="w-[76px] shrink-0 truncate text-[10.5px] text-ink-muted">{label}</span>
-        <span className="ml-auto flex shrink-0 items-center">{children}</span>
-      </div>
-    </Tooltip>
+    <div
+      className={cn(
+        'flex min-w-0 items-center gap-2',
+        disabled && 'pointer-events-none opacity-45',
+      )}
+    >
+      {/* The tooltip hangs off the label rather than the row: the control is a
+          drag-to-scrub field, and nothing else should be listening to pointers
+          over it. */}
+      <Tooltip content={hint} side="left">
+        <span
+          tabIndex={0}
+          className="w-[76px] shrink-0 truncate rounded-sm text-[10.5px] text-ink-muted focus-visible:outline-1"
+        >
+          {label}
+        </span>
+      </Tooltip>
+      <span className="ml-auto flex shrink-0 items-center">{children}</span>
+    </div>
   );
 }
 
@@ -1155,13 +1188,17 @@ function RhythmReport({ result, onSelectCell }: ReportProps<RhythmResult>) {
             label="Dominant"
             value={spectrum.dominantHz > 0 ? `${fixed(spectrum.dominantHz, 1)} Hz` : '—'}
             hint={`Peak of the population-rate spectrum between 1 and ${fixed(spectrum.searchMaxHz, 0)} Hz, interpolated between bins.`}
-            tone={spectrum.band === null ? undefined : undefined}
-            color={spectrum.band?.color}
+            color={quiet ? undefined : spectrum.band?.color}
           />
           <Stat
-            label="Band share"
-            value={`${(spectrum.dominantShare * 100).toFixed(0)}%`}
-            hint="Share of the in-band power held by the band the peak falls in."
+            label="Prominence"
+            value={spectrum.prominence > 0 ? `${fixed(spectrum.prominence, 1)}×` : '—'}
+            hint={`Peak power over the median power of the search band. A record this long with no rhythm in it reaches ${fixed(spectrum.flatProminence, 1)}× on its own, so a peak below that is noise.`}
+            tone={
+              spectrum.prominence > 0 && spectrum.prominence < spectrum.flatProminence
+                ? 'text-warning'
+                : 'text-accent'
+            }
           />
           <Stat
             label="Synchrony"
@@ -1302,24 +1339,32 @@ function LesionReport({ result, onSelectCell }: ReportProps<LesionResult>) {
           overlay={lesioned.spectrum}
           overlayColor="var(--color-danger)"
           strokeColor="var(--color-ink-muted)"
-          muted={control.spikes < 50}
+          muted={control.spikes < MIN_SPECTRUM_SPIKES}
         />
+        {/* Prominence sits next to each peak because a frequency that moved is
+            only news when the peak it moved was above the noise floor. */}
         <div className="mt-1 flex items-baseline justify-between text-[9.5px] text-ink-faint">
           <span>
             control{' '}
             <span className="nf-numeric text-ink-muted">
               {control.dominantHz > 0 ? `${fixed(control.dominantHz, 1)} Hz` : '—'}
             </span>
-            {control.band !== null ? ` · ${control.band.label}` : ''}
+            {control.band !== null ? ` · ${control.band.label} · ` : ' · '}
+            <span className="nf-numeric">{fixed(control.spectrum.prominence, 1)}×</span>
           </span>
           <span>
             lesioned{' '}
             <span className="nf-numeric text-danger">
               {lesioned.dominantHz > 0 ? `${fixed(lesioned.dominantHz, 1)} Hz` : '—'}
             </span>
-            {lesioned.band !== null ? ` · ${lesioned.band.label}` : ''}
+            {lesioned.band !== null ? ` · ${lesioned.band.label} · ` : ' · '}
+            <span className="nf-numeric">{fixed(lesioned.spectrum.prominence, 1)}×</span>
           </span>
         </div>
+        <p className="mt-1 text-[9.5px] leading-snug text-ink-faint">
+          Prominence is the peak over the median power of the band; a record with no rhythm in it
+          reaches {fixed(control.spectrum.flatProminence, 1)}× on its own.
+        </p>
       </PanelSection>
 
       <PanelSection
@@ -1380,9 +1425,9 @@ function TransferReport({ result, onSelectCell }: ReportProps<TransferResult>) {
             <span className="flex-1 text-right">driven</span>
             <span className="w-[56px] shrink-0 text-right">readout</span>
           </div>
-          {result.points.map((point) => (
+          {result.points.map((point, index) => (
             <div
-              key={point.requestedHz}
+              key={index}
               className="nf-numeric flex items-baseline gap-2 text-[10.5px]"
             >
               <span className="w-[54px] shrink-0 text-ink-faint">
@@ -1861,9 +1906,9 @@ function TransferChart({ result }: { result: TransferResult }) {
         <path d={path} fill="none" stroke="var(--color-accent)" strokeWidth={1.25} strokeLinejoin="round" />
       ) : null}
 
-      {points.map((point) => (
+      {points.map((point, index) => (
         <circle
-          key={point.requestedHz}
+          key={index}
           cx={x(point.deliveredHz)}
           cy={y(point.outputRateHz)}
           r={1.9}

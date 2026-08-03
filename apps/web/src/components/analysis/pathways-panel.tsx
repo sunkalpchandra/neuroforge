@@ -104,6 +104,8 @@ type Status =
   | 'target-gone'
   | 'same'
   | 'unreachable'
+  /** The search ran out of visits before it could prove anything either way. */
+  | 'budget'
   | 'ok';
 
 interface Analysis {
@@ -180,18 +182,22 @@ export function PathwaysPanel({ open = true, onClose, className }: PathwaysPanel
   // Copy-on-write means any edit to a cell or a synapse replaces these arrays.
   // Rewiring an endpoint or retuning a weight leaves the counts alone, which the
   // buffer signature cannot see, so the edit is flagged here and picked up by
-  // the poll below — which runs after the ancestor effect that reloads the
-  // engine, and therefore always reads buffers at least as new as the flag.
+  // the poll below.
   useEffect(() => {
     dirtyRef.current = true;
   }, [circuit.neurons, circuit.synapses]);
 
   useEffect(() => {
     if (!open) return;
+    // The flag is deliberately *not* cleared here. The pass that clears it is
+    // the one that reads the buffers, a frame later; clearing at poll time
+    // would retire an edit that the search has not yet looked at, and since a
+    // rewire leaves the signature identical there would be nothing left to
+    // notice it. A redundant revision bump costs one BFS; a dropped one leaves
+    // the panel describing wiring that no longer exists.
     const poll = () => {
       const signature = graphSignature(getEngine().buffers);
       if (!dirtyRef.current && signature === signatureRef.current) return;
-      dirtyRef.current = false;
       setRevision((value) => value + 1);
     };
     poll();
@@ -212,6 +218,10 @@ export function PathwaysPanel({ open = true, onClose, className }: PathwaysPanel
         const buffers = engine.buffers;
         const signature = graphSignature(buffers);
         signatureRef.current = signature;
+        // Cleared only now, against the buffers this pass actually searched, so
+        // an edit raised after the poll but before this frame survives to the
+        // next tick instead of being retired unseen.
+        dirtyRef.current = false;
 
         const cached = graphRef.current;
         const graph =
@@ -263,11 +273,16 @@ export function PathwaysPanel({ open = true, onClose, className }: PathwaysPanel
             for (const slot of route.nodes) remember(slot);
           }
           if (routes.length === 0) {
-            status = 'unreachable';
-            // Whether the signal runs the other way is the first thing a user
-            // wants to know about a dead end, and it is one more BFS.
-            const reverse = shortestPath(graph, target, source);
-            reverseHops = reverse === null ? null : reverse.length - 1;
+            // A search that stopped on its visit budget has not shown the cells
+            // to be disconnected — it has shown nothing at all. Reporting that
+            // as "unreachable" would state a result the search never reached.
+            status = found.truncated ? 'budget' : 'unreachable';
+            if (status === 'unreachable') {
+              // Whether the signal runs the other way is the first thing a user
+              // wants to know about a dead end, and it is one more BFS.
+              const reverse = shortestPath(graph, target, source);
+              reverseHops = reverse === null ? null : reverse.length - 1;
+            }
           }
         }
 
@@ -347,18 +362,16 @@ export function PathwaysPanel({ open = true, onClose, className }: PathwaysPanel
     const routes = analysis === null ? [] : [...analysis.routes];
     routes.sort((a, b) => {
       if (rank === 'weight') {
-        // Compared rather than subtracted: a route through a zero-conductance
-        // synapse has a log weight of -Infinity, and the difference of two of
-        // those is NaN, which would scramble the whole ordering.
-        if (a.logWeight !== b.logWeight) return b.logWeight > a.logWeight ? 1 : -1;
-        return a.length - b.length;
+        const by = byMagnitude(a.logWeight, b.logWeight, true);
+        return by !== 0 ? by : a.length - b.length;
       }
       if (rank === 'delay') {
-        if (a.delay !== b.delay) return a.delay - b.delay;
-        return a.length - b.length;
+        const by = byMagnitude(a.delay, b.delay, false);
+        return by !== 0 ? by : a.length - b.length;
       }
+      // Hop counts are small integers, so this one really can be subtracted.
       if (a.length !== b.length) return a.length - b.length;
-      return a.delay - b.delay;
+      return byMagnitude(a.delay, b.delay, false);
     });
     return routes;
   }, [analysis, rank]);
@@ -947,6 +960,36 @@ function routeKey(route: Route): string {
   return route.nodes.join('-');
 }
 
+/**
+ * Total order over a route key that may not be finite.
+ *
+ * Both keys the ranker uses reach non-finite values in ordinary running
+ * networks: `Σ ln w` is −Infinity the moment depression drives any synapse on
+ * the route to exactly zero, and it is NaN if a weight ever goes negative,
+ * which a diverging plasticity rule can do because the wMin/wMax clamp lets NaN
+ * through — every comparison against NaN is false, so `next < wMin` and
+ * `next > wMax` both fail and the NaN is stored.
+ *
+ * Subtracting those keys is what a comparator normally does and it is wrong
+ * here twice over: `−Infinity − −Infinity` is NaN, and a NaN key makes a naive
+ * comparator answer "a before b" for both orderings, which is not a valid
+ * ordering at all and leaves the route list in whatever arrangement the sort
+ * happens to land on. Non-finite keys are ranked explicitly instead and always
+ * sink to the bottom, where a route that conducts nothing belongs.
+ */
+function byMagnitude(a: number, b: number, descending: boolean): number {
+  const aFinite = Number.isFinite(a);
+  const bFinite = Number.isFinite(b);
+  if (!aFinite || !bFinite) {
+    if (aFinite) return -1;
+    if (bFinite) return 1;
+    return 0;
+  }
+  if (a === b) return 0;
+  if (descending) return a < b ? 1 : -1;
+  return a < b ? -1 : 1;
+}
+
 function nameOf(neuron: Neuron): string {
   return neuron.label.length > 0 ? neuron.label : neuron.id.slice(0, 8);
 }
@@ -1082,6 +1125,32 @@ function Notice({
         Source and target are the same cell, so there is no route to trace. The spectrum below
         counts the recurrent loops that leave {sourceName ?? 'it'} and come back instead.
       </p>
+    );
+  }
+
+  if (status === 'budget') {
+    // Distinct from `unreachable` on purpose: the search was stopped, not
+    // answered, and saying so is the only honest reading of the result.
+    return (
+      <div className="flex flex-col gap-1.5">
+        <p className="flex items-start gap-1.5 text-[10.5px] leading-snug text-ink-muted">
+          <TriangleAlert size={12} className="mt-px shrink-0 text-warning" aria-hidden />
+          <span>
+            The search ran out of visits before it reached {targetName ?? 'the target'}, so
+            whether a route exists is still unknown — this is not a report that the two are
+            disconnected.
+          </span>
+        </p>
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<RefreshCw size={11} />}
+          className="h-6 self-start px-2 text-[10.5px]"
+          onClick={onRecompute}
+        >
+          Search again
+        </Button>
+      </div>
     );
   }
 

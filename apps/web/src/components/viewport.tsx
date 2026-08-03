@@ -23,6 +23,7 @@ import {
   NeuronField,
   SelectionOverlay,
   SpikeParticles,
+  SynapseMarkers,
 } from '@neuroforge/renderer';
 import { createIntegrator, requestComputeDevice } from '@neuroforge/simulation';
 import { COLORS, DEFAULT_RENDER_SETTINGS } from '@neuroforge/shared';
@@ -56,6 +57,7 @@ function Loop({
     neurons: NeuronField;
     axons: AxonField;
     particles: SpikeParticles;
+    synapses: SynapseMarkers;
     grid: InfiniteGrid;
     selection: SelectionOverlay;
     rig: CameraRig;
@@ -92,6 +94,7 @@ function Loop({
     fields.neurons.update(buffers, dt, settings);
     fields.axons.update(buffers, dt, settings);
     fields.selection.update(buffers, dt);
+    if (settings.showSynapses) fields.synapses.update(buffers, settings);
     if (settings.showParticles) {
       fields.particles.emitFromSpikes(buffers);
       fields.particles.update(dt, settings);
@@ -141,6 +144,7 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
       neurons: new NeuronField(library),
       axons: new AxonField(),
       particles: new SpikeParticles(65536),
+      synapses: new SynapseMarkers(8192),
       grid: new InfiniteGrid(),
       selection: new SelectionOverlay(),
       rig: new CameraRig(camera as THREE.PerspectiveCamera, gl.domElement),
@@ -151,6 +155,7 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
     const engine = getEngine();
     fields.neurons.rebuild(engine.buffers);
     fields.axons.rebuild(engine.buffers);
+    fields.synapses.rebuild(engine.buffers);
   }, [fields]);
 
   useEffect(() => {
@@ -158,6 +163,7 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
       fields.neurons.dispose();
       fields.axons.dispose();
       fields.particles.dispose();
+      fields.synapses.dispose();
       fields.grid.dispose();
       fields.selection.dispose();
       fields.rig.dispose();
@@ -196,6 +202,7 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
       {settings.gridVisible ? <primitive object={fields.grid} /> : null}
       <primitive object={fields.neurons} />
       {settings.showAxons ? <primitive object={fields.axons} /> : null}
+      {settings.showSynapses ? <primitive object={fields.synapses} /> : null}
       {settings.showParticles ? <primitive object={fields.particles} /> : null}
       <primitive object={fields.selection} />
 

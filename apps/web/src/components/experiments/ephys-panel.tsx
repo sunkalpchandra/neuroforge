@@ -679,14 +679,13 @@ function IvView({ result, color }: { result: IvResult; color: string }) {
 
 function TauView({ result, color }: { result: TauResult; color: string }) {
   const trace = decimate(result.traceT, result.traceV, 400);
-  const stepMs = result.params.stepMs;
   const fitPoints: PlotPoint[] = [];
   const samples = 120;
   for (let i = 0; i <= samples; i += 1) {
-    const t = (i / samples) * stepMs;
+    const t = (i / samples) * result.fitWindowMs;
     fitPoints.push({
       x: t,
-      y: result.steadyMv + (result.baselineMv - result.steadyMv) * Math.exp(-t / result.tauMs),
+      y: result.fitOffsetMv + result.fitAmplitudeMv * Math.exp(-t / result.tauMs),
     });
   }
 
@@ -697,10 +696,10 @@ function TauView({ result, color }: { result: TauResult; color: string }) {
           label="Fitted τ"
           value={`${fixed(result.tauMs, 3)} ms`}
           tone="text-accent"
-          hint={`Single-exponential fit in the log domain over ${result.fitPoints} samples, r² ${fixed(
-            result.fitR2,
-            5,
-          )}.`}
+          hint={`Least-squares A·exp(-t/τ)+C over the first ${fixed(
+            result.fitWindowMs,
+            1,
+          )} ms of the step, ${result.fitPoints} samples, r² ${fixed(result.fitR2, 5)}.`}
         />
         <Stat
           label="Analytic cm/gL"
@@ -745,7 +744,7 @@ function TauView({ result, color }: { result: TauResult; color: string }) {
           },
         ]}
         markers={[
-          { axis: 'y', value: result.steadyMv, color: 'var(--color-ink-faint)', label: 'steady' },
+          { axis: 'y', value: result.fitOffsetMv, color: 'var(--color-ink-faint)', label: 'asymptote' },
           { axis: 'x', value: 0, color: 'var(--color-warning)', label: 'step' },
         ]}
         height={158}
@@ -754,8 +753,9 @@ function TauView({ result, color }: { result: TauResult; color: string }) {
         ariaLabel={`Membrane decay with a fitted time constant of ${fixed(result.tauMs, 2)} milliseconds`}
       />
       <Note>
-        Dashed trace is the fitted exponential. Samples below 2 % of the deflection are outside the
-        fit — they carry float noise rather than slope.
+        Dashed trace is the fit, taken over the first {fixed(result.fitWindowMs, 1)} ms — up to the
+        peak of the deflection, so a slower process pulling the membrane back afterwards cannot
+        contaminate τ. Fit r² {fixed(result.fitR2, 4)}.
       </Note>
     </>
   );
@@ -1134,9 +1134,14 @@ export function EphysPanel({ open = true, onClose, className }: EphysPanelProps)
       case 'iv':
         return sweepCount(iv.fromPa, iv.toPa, iv.stepPa, MAX_LEVELS);
       case 'ppr':
-        return sweepCount(ppr.fromMs, ppr.toMs, ppr.stepMs, MAX_INTERVALS) *
-          Math.max(1, Math.round(ppr.trials)) *
-          2;
+        // Two trials per repeat — a single-pulse control and the pair — plus the
+        // one condition spent calibrating the stimulus.
+        return (
+          1 +
+          sweepCount(ppr.fromMs, ppr.toMs, ppr.stepMs, MAX_INTERVALS) *
+            Math.max(1, Math.round(ppr.trials)) *
+            2
+        );
       case 'rheobase':
         return (
           2 +
@@ -1157,10 +1162,16 @@ export function EphysPanel({ open = true, onClose, className }: EphysPanelProps)
   const blocked =
     neuron === null
       ? 'Select a neuron to record from.'
-      : protocol === 'ppr' && usable.length === 0
+      : // A disabled cell is skipped by the integrator entirely, so every
+        // protocol would report a flat line rather than a measurement.
+        !neuron.enabled
+        ? 'This cell is disabled and excluded from integration. Enable it in the inspector to record from it.'
+        : protocol === 'ppr' && !usable.some((synapse) => synapse.id === synapseId)
         ? outgoing.length === 0
           ? 'This cell has no outgoing synapses to stimulate through.'
-          : 'Every outgoing synapse is disabled or a gap junction.'
+          : usable.length === 0
+            ? 'Every outgoing synapse is disabled or a gap junction.'
+            : 'Choose a synapse to stimulate through.'
         : null;
 
   const run = useCallback(async () => {

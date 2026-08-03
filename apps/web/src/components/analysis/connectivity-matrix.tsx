@@ -810,7 +810,19 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
   // rather than sitting there as an unexplained black rectangle.
   const [unavailable, setUnavailable] = useState(false);
 
-  const hostRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * The measured element is held as state rather than in a ref because it does
+   * not exist yet on the commit that first runs the effect below.
+   *
+   * Until the first build lands, this component renders the loading panel,
+   * which has no canvas host. A ref object would therefore still be null when
+   * the sizing effect ran, and because `open` — its only other input — never
+   * changes afterwards, the effect would never run again: the ResizeObserver
+   * would never attach, the surface would stay at zero and the matrix would
+   * never paint. A callback ref re-runs the effect on the commit that actually
+   * attaches the node.
+   */
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const busyRef = useRef(false);
@@ -941,10 +953,12 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
 
   /* ------------------------------------------------------------- surface -- */
 
+  const attachHost = useCallback((node: HTMLDivElement | null) => {
+    setHost(node);
+  }, []);
+
   useEffect(() => {
-    if (!open) return;
-    const host = hostRef.current;
-    if (host === null) return;
+    if (!open || host === null) return;
 
     const measure = () => {
       setSurface((current) => {
@@ -968,7 +982,7 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       observer.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [open]);
+  }, [open, host]);
 
   /* --------------------------------------------------------------- paint -- */
 
@@ -1102,8 +1116,12 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
 
   /* ---------------------------------------------------------------- view -- */
 
-  const placement =
-    className ?? 'absolute top-3 bottom-3 left-1/2 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2';
+  // Edge-anchored with no transform, like every other panel. The `.nf-docked`
+  // adapter neutralises a floating panel's position, inset and width when it is
+  // mounted in a dock, but it cannot neutralise a transform — a centring
+  // `-translate-x-1/2` survives docking and shifts the panel half its own width
+  // out of the column, where the dock's `overflow-hidden` clips it.
+  const placement = className ?? 'absolute top-3 bottom-3 right-3 w-[min(520px,calc(100vw-2rem))]';
 
   const header = (
     <PanelHeader
@@ -1251,12 +1269,19 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       : null;
 
   const scaleLabel = diverging ? 'diverging · net E/I sign' : 'sequential · magnitude';
+  const peak = formatValue(field.max, field.unit);
   const rangeLabel =
     field.max <= 0
       ? 'nothing connected'
-      : log && Number.isFinite(field.minPositive)
-        ? `${formatValue(field.minPositive, field.unit)} → ${formatValue(field.max, field.unit)}`
-        : `0 → ${formatValue(field.max, field.unit)}`;
+      : diverging
+        ? // Both arms of the diverging ramp are driven by the same magnitude, so
+          // the bar runs from −max on the left, through the field colour at
+          // zero, to +max on the right. Printing the magnitude range alone would
+          // put one end's numbers on a two-ended bar.
+          `−${peak} → +${peak}`
+        : log && Number.isFinite(field.minPositive)
+          ? `${formatValue(field.minPositive, field.unit)} → ${peak}`
+          : `0 → ${peak}`;
 
   return (
     <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
@@ -1264,7 +1289,7 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
       {controls}
 
       <div
-        ref={hostRef}
+        ref={attachHost}
         tabIndex={0}
         aria-label={`Connectivity matrix, ${count} by ${count}, grouped by ${data.mode}, ${grouped(
           data.shownEdges,
@@ -1317,12 +1342,13 @@ export function ConnectivityMatrix({ open = true, onClose, className }: Connecti
         <div className="mt-0.5 flex min-h-[30px] flex-col justify-center gap-1">
           {hovered === null ? (
             <p className="text-[10.5px] leading-tight text-ink-faint">
-              {data.hiddenEdges > 0 || data.omitted > 0 ? (
-                <>
-                  {grouped(data.hiddenEdges)} synapses reach outside this matrix
-                  {data.omitted > 0 ? `, ${grouped(data.omitted)} cells omitted by the cap` : ''}.{' '}
-                </>
+              {/* Each clause is printed only when it has something to report:
+                  the two are independent, and an unconnected network can omit
+                  cells without hiding a single synapse. */}
+              {data.hiddenEdges > 0 ? (
+                <>{grouped(data.hiddenEdges)} synapses reach outside this matrix. </>
               ) : null}
+              {data.omitted > 0 ? <>{grouped(data.omitted)} cells are not shown. </> : null}
               Hover a cell to read its connection statistics; click to select the cells involved.
             </p>
           ) : (

@@ -20,3 +20,4 @@ export { SelectionOverlay } from './selection';
 export { createRenderer } from './renderer';
 export { CameraRig } from './camera';
 export type { CameraMode } from './camera';
+export { SynapseMarkers } from './synapse-markers';

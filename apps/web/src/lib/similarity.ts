@@ -408,7 +408,13 @@ export function similarCells(prints: Fingerprints, slot: number, k: number): Sim
 
   const wanted = Math.max(1, Math.min(Math.floor(k), MAX_SIMILAR, Math.max(1, count - 1)));
   const bestSlots = new Int32Array(wanted);
-  const bestScores = new Float32Array(wanted);
+  // Float64, not Float32: the dot products accumulate in double, and rounding
+  // the kept scores to single would make two cells whose cosines differ in the
+  // ninth decimal compare equal — near 1, where the interesting matches are, a
+  // float32 step is 6e-8 wide. Comparing a double against a rounded-down stored
+  // score also lets a strictly worse later cell displace a better earlier one,
+  // which is the tie rule below running backwards.
+  const bestScores = new Float64Array(wanted);
   let length = 0;
 
   const query = slot * dim;
