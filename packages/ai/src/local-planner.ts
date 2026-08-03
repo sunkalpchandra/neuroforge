@@ -90,6 +90,11 @@ const CREATION_VERBS: ReadonlySet<string> = new Set([
 const CONTAINER_NOUNS: ReadonlySet<string> = new Set(['population', 'populations']);
 /** Ceiling on "N populations of …", so a typo cannot fill the document. */
 const MAX_REPEATED_POPULATIONS = 8;
+/**
+ * Words inside an already-normalised phrase. Safe to share: `String.match` with a
+ * global pattern resets `lastIndex` itself.
+ */
+const WORD_RE = /[a-z0-9]+(?:[-'][a-z0-9]+)*/g;
 /** Words that say an edit applies to the whole circuit rather than one population. */
 const GLOBAL_SCOPE_WORDS = ['everything', 'every', 'all', 'both', 'each', 'entire', 'whole'];
 /** Words joining conjuncts that share a governing verb. */
@@ -191,6 +196,8 @@ class Planner {
   private layoutOverride: AnalyticLayout | null = null;
   private cleared = false;
   private seedCounter = 0;
+  /** Right-hand edge of everything placed so far, in world X. */
+  private placementCursor = 0;
 
   constructor(prompt: string, circuit: Circuit) {
     this.scan = new PromptScan(prompt);
@@ -647,18 +654,32 @@ class Planner {
 
   /** Lay the new populations out along X, clear of anything the document already holds. */
   private emitPopulations(drafts: readonly PopulationDraft[]): void {
-    let cursor = 0;
-    for (const population of this.circuit.populations) {
-      cursor = Math.max(cursor, population.origin.x + layoutRadius(population.layout));
+    // A cleared document holds nothing to avoid, and the cursor has to survive
+    // across calls: `applyRhythm` and the connect pass both emit populations
+    // after `createPopulations` has already placed some.
+    let cursor = this.placementCursor;
+    if (!this.cleared) {
+      for (const population of this.circuit.populations) {
+        cursor = Math.max(cursor, population.origin.x + layoutRadius(population.layout));
+      }
     }
-    if (cursor > 0) cursor += GAP_BETWEEN_POPULATIONS;
+    const clearing = cursor > 0;
+    if (clearing) cursor += GAP_BETWEEN_POPULATIONS;
     const offsets: number[] = [];
     for (const draft of drafts) {
       const radius = layoutRadius(draft.layout);
       offsets.push(cursor + radius);
       cursor += 2 * radius + GAP_BETWEEN_POPULATIONS;
     }
-    const centre = drafts.length > 1 ? (offsets[0] + offsets[offsets.length - 1]) * 0.5 : offsets[0];
+    this.placementCursor = cursor;
+    // Only a plan starting from an empty row centres its populations on the
+    // origin. Recentring while something else is already placed would undo the
+    // clearance the cursor just computed and drop the new cells on top of it.
+    const centre = clearing
+      ? 0
+      : drafts.length > 1
+        ? (offsets[0] + offsets[offsets.length - 1]) * 0.5
+        : offsets[0];
 
     for (let i = 0; i < drafts.length; i += 1) {
       const draft = drafts[i];
@@ -693,8 +714,8 @@ class Planner {
 
   private applyConnectRequests(requests: readonly ConnectRequest[]): void {
     for (const request of requests) {
-      const source = this.resolvePopulation(request.sourceText);
-      const target = this.resolvePopulation(request.targetText);
+      const source = this.resolveOrCreate(request.sourceText);
+      const target = this.resolveOrCreate(request.targetText);
       if (source === null || target === null) {
         const missing = source === null ? request.sourceText : request.targetText;
         this.warn(
@@ -741,9 +762,34 @@ class Planner {
     return score;
   }
 
+  /**
+   * The population a connect phrase names, building it when the phrase describes
+   * cells the document does not have. "Connect 400 pyramidal cells to 100 basket
+   * cells" asks for both populations as well as the projection, and the connect
+   * clause claims that text before `createPopulations` ever sees it, so this is
+   * the only place those phrases can be turned into populations.
+   */
+  private resolveOrCreate(phrase: string): KnownPopulation | null {
+    const existing = this.resolvePopulation(phrase);
+    if (existing !== null) return existing;
+    const words = phrase.toLowerCase().match(WORD_RE) ?? [];
+    let head = -1;
+    for (let i = words.length - 1; i >= 0; i -= 1) {
+      if (HEAD_NOUNS.has(words[i])) {
+        head = i;
+        break;
+      }
+    }
+    if (head === -1) return null;
+    const draft = this.draftFromPhrase(words.slice(0, head + 1), words[head], []);
+    if (draft === null) return null;
+    this.emitPopulations([draft]);
+    return this.populations[this.populations.length - 1];
+  }
+
   private resolvePopulation(phrase: string): KnownPopulation | null {
     const lower = phrase.toLowerCase();
-    const words = lower.match(/[a-z0-9]+(?:[-'][a-z0-9]+)*/g) ?? [];
+    const words = lower.match(WORD_RE) ?? [];
     if (words.length === 0) return null;
     let best: KnownPopulation | null = null;
     let bestScore = 0;

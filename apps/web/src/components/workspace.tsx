@@ -6,6 +6,7 @@ import { buildShortcuts, useEditor } from '@neuroforge/editor';
 import { Autosaver } from '@neuroforge/io';
 import type { NeuronId } from '@neuroforge/shared';
 
+import { AiBuilder } from './builder/ai-builder';
 import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
@@ -118,6 +119,7 @@ export function Workspace() {
         {/* Panels float over the canvas and are pointer-transparent where they
             are empty, so dragging the scene never snags on panel gutters. */}
         <div className="pointer-events-none absolute inset-0">
+          <AiBuilder />
           <Inspector />
         </div>
       </main>
