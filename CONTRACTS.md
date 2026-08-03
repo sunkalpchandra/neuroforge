@@ -17,6 +17,35 @@ path across packages. Inside a package, use relative paths.
 
 ---
 
+## Architecture decision: where WebGPU is used
+
+Verified against the installed versions: `@react-three/postprocessing@3.0.4`
+composes over `postprocessing@6.39`, which is a **WebGL-only** effect library. It
+cannot render into a `WebGPURenderer`. Choosing `WebGPURenderer` therefore means
+giving up the entire mature post chain — bloom, depth of field, SSAO, SSR,
+vignette, chromatic aberration — and rebuilding it from TSL display nodes.
+
+So NeuroForge splits the two uses of the GPU:
+
+- **Compute is WebGPU.** The integrator runs as WGSL compute shaders on a
+  `GPUDevice` obtained directly from `navigator.gpu`, independent of any canvas.
+  This is where WebGPU actually pays: thousands of neurons integrated in
+  parallel. State is read back asynchronously via `mapAsync`, which costs one
+  frame of latency and no pipeline stall.
+- **Rendering is WebGL2.** A tuned `THREE.WebGLRenderer` with the full
+  `postprocessing` effect chain. It runs everywhere — including Safari and
+  Firefox, where WebGPU is still uneven — and it is what makes the scene look
+  expensive.
+
+`createRenderer()` returns `{ renderer, backend, device }` where `device` is the
+compute `GPUDevice` (or null) and `backend` describes the *render* path. The two
+are deliberately decoupled: a machine can have WebGPU compute with WebGL2
+rendering, and that is the expected configuration.
+
+Neither the renderer nor the simulation may assume the other's backend.
+
+---
+
 ## `@neuroforge/math`
 
 ```ts
