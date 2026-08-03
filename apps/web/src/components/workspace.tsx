@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect } from 'react';
 import { ToastViewport, pushToast } from '@neuroforge/ui';
+import {
+  Activity,
+  ChartNetwork,
+  Search as SearchIcon,
+  Share2,
+  SlidersHorizontal,
+  Sparkles,
+} from 'lucide-react';
 import { buildShortcuts, useEditor } from '@neuroforge/editor';
 import { Autosaver, createSnapshot } from '@neuroforge/io';
 import type { NeuronId } from '@neuroforge/shared';
@@ -15,11 +23,30 @@ import { LibraryPanel } from './library/library-panel';
 import { SelectionList } from './selection-list';
 import { ViewControls } from './view-controls';
 import { ViewportHud } from './viewport-hud';
+import { Dock } from './dock';
+import type { DockEntry } from './dock';
+import { useDock } from '@/lib/dock-store';
 import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
 import { Viewport } from './viewport';
 import { boundsOf, getEngine, requestCameraFrame, syncSelectionFlags } from '@/lib/runtime';
+
+
+const LEFT_DOCK: readonly DockEntry[] = [
+  { tab: 'builder', title: 'AI builder', icon: <Sparkles />, render: () => <AiBuilder /> },
+  { tab: 'search', title: 'Search cells', icon: <SearchIcon />, render: () => <SearchPanel /> },
+];
+
+const RIGHT_DOCK: readonly DockEntry[] = [
+  { tab: 'inspector', title: 'Inspector', icon: <SlidersHorizontal />, render: () => <Inspector /> },
+  { tab: 'analysis', title: 'Network analysis', icon: <ChartNetwork />, render: () => <NetworkAnalysis /> },
+  { tab: 'library', title: 'Export & snapshots', icon: <Share2 />, render: () => <LibraryPanel /> },
+];
+
+const BOTTOM_DOCK: readonly DockEntry[] = [
+  { tab: 'raster', title: 'Spike raster', icon: <Activity />, render: () => <RasterPlot /> },
+];
 
 /** Match a KeyboardEvent against a shortcut descriptor like "Mod+Shift+Z". */
 function matches(event: KeyboardEvent, keys: string): boolean {
@@ -156,6 +183,20 @@ export function Workspace() {
     return () => window.removeEventListener('neuroforge:shortcut', onAction);
   }, []);
 
+
+  // Each docked panel still decides for itself whether to render, from the flags
+  // the editor store owns. The dock is now the authority on what is visible, so
+  // it publishes into those flags rather than the panels being toggled directly.
+  const leftActive = useDock((s) => s.left.active);
+  const rightActive = useDock((s) => s.right.active);
+  const togglePanel = useEditor((s) => s.togglePanel);
+
+  useEffect(() => {
+    togglePanel('builder', leftActive === 'builder');
+    togglePanel('library', leftActive === 'library' || rightActive === 'library');
+    togglePanel('inspector', rightActive === 'inspector');
+  }, [leftActive, rightActive, togglePanel]);
+
   useEffect(() => {
     const autosaver = new Autosaver(1500);
     autosaver.start(
@@ -173,28 +214,32 @@ export function Workspace() {
   return (
     <div className="flex h-dvh w-dvw flex-col overflow-hidden bg-bg">
       <TopBar />
-      <main className="relative flex-1 overflow-hidden">
-        <Viewport render={circuit.render} onPick={onPick} />
-        {/* Panels float over the canvas and are pointer-transparent where they
-            are empty, so dragging the scene never snags on panel gutters. */}
-        <div className="pointer-events-none absolute inset-0">
-          <AiBuilder />
-          <Inspector />
-          <ViewportHud />
-          <ViewControls />
-          <NetworkAnalysis />
-          <SearchPanel />
-          <SelectionList />
-          <LibraryPanel />
+
+      <div className="flex min-h-0 flex-1">
+        <Dock side="left" entries={LEFT_DOCK} />
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <main className="relative min-h-0 flex-1 overflow-hidden">
+            <Viewport render={circuit.render} onPick={onPick} />
+            {/* Only readouts and scene controls float over the canvas now; every
+                tool panel is docked. The layer is pointer-transparent where it is
+                empty so dragging the scene never snags on a gutter. */}
+            <div className="pointer-events-none absolute inset-0">
+              <ViewportHud />
+              <ViewControls />
+              <SelectionList />
+            </div>
+          </main>
+
+          <Dock side="bottom" entries={BOTTOM_DOCK} />
         </div>
-      </main>
-      {/* Docked rather than floated: the raster is read against the scene while
-          the simulation runs, so it takes its own band of the column instead of
-          covering the cells it is reporting on. */}
-      <RasterPlot />
+
+        <Dock side="right" entries={RIGHT_DOCK} />
+      </div>
+
       <StatusBar />
-      {/* Outside the panel layer: it portals to the body and owns the whole
-          viewport while it is open, so it must not inherit pointer-events-none. */}
+      {/* Outside every layer: it portals to the body and owns the whole viewport
+          while open, so it must not inherit pointer-events-none. */}
       <CommandPalette />
       <ToastViewport position="bottom-right" />
     </div>

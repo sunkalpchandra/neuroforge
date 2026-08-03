@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { IconButton, Separator, Tooltip } from '@neuroforge/ui';
 import { useEditor } from '@neuroforge/editor';
+import { useDock } from '@/lib/dock-store';
 import type { Tool } from '@neuroforge/editor';
 
 import { Transport } from './transport';
@@ -44,8 +45,13 @@ export function TopBar() {
   const undoDepth = useEditor((s) => s.undoDepth);
   const redoDepth = useEditor((s) => s.redoDepth);
   const togglePanel = useEditor((s) => s.togglePanel);
-  const builderOpen = useEditor((s) => s.builderOpen);
-  const inspectorOpen = useEditor((s) => s.inspectorOpen);
+  // Panel visibility is the dock's to decide now, so these read and drive it
+  // rather than the editor's flags, which the dock publishes into.
+  const toggleDock = useDock((s) => s.toggle);
+  const leftActive = useDock((s) => s.left.active);
+  const rightActive = useDock((s) => s.right.active);
+  const builderOpen = leftActive === 'builder';
+  const inspectorOpen = rightActive === 'inspector';
 
   const openPalette = useCallback(() => togglePanel('commandPalette', true), [togglePanel]);
 
@@ -114,7 +120,7 @@ export function TopBar() {
           size="sm"
           variant={builderOpen ? 'secondary' : 'ghost'}
           aria-pressed={builderOpen}
-          onClick={() => togglePanel('builder')}
+          onClick={() => toggleDock('left', 'builder')}
         >
           <Sparkles />
         </IconButton>
@@ -126,7 +132,7 @@ export function TopBar() {
           size="sm"
           variant={inspectorOpen ? 'secondary' : 'ghost'}
           aria-pressed={inspectorOpen}
-          onClick={() => togglePanel('inspector')}
+          onClick={() => toggleDock('right', 'inspector')}
         >
           <SlidersHorizontal />
         </IconButton>
@@ -136,7 +142,7 @@ export function TopBar() {
         <IconButton
           label="Export circuit"
           size="sm"
-          onClick={() => togglePanel('library', true)}
+          onClick={() => toggleDock('right', 'library')}
         >
           <Share2 />
         </IconButton>

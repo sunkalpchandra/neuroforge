@@ -130,6 +130,31 @@
     box-shadow: var(--shadow-float);
   }
 
+  /*
+   * Adapter for panels rendered inside a dock.
+   *
+   * The panels were written as floating surfaces: each positions itself against
+   * the viewport, sets its own width, and rounds its own corners. Docking them
+   * means overriding exactly those three decisions, and doing it here rather
+   * than editing a dozen components keeps a panel usable both floating and
+   * docked. The !important is load-bearing — it is overriding utility classes
+   * of equal specificity that are baked into each panel's own markup.
+   */
+  .nf-docked > * {
+    position: static !important;
+    inset: auto !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: 100% !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+    border-width: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
   /* Numeric readouts: tabular figures so values do not jitter as they change. */
   .nf-numeric {
     font-family: var(--font-mono);
