@@ -4,8 +4,16 @@ import { useCallback, useState } from 'react';
 import { ChevronDown, Eye, Layers } from 'lucide-react';
 import { IconButton, Slider, Tooltip } from '@neuroforge/ui';
 import { useEditor } from '@neuroforge/editor';
-import { COLOR_MODES, COLOR_MODE_LABELS, identityColorHex } from '@neuroforge/shared';
-import type { ColorMode, RenderSettings } from '@neuroforge/shared';
+import {
+  COLOR_MODES,
+  COLOR_MODE_LABELS,
+  RENDER_PRESETS,
+  RENDER_PRESET_HINTS,
+  RENDER_PRESET_LABELS,
+  RENDER_PRESET_PATCHES,
+  identityColorHex,
+} from '@neuroforge/shared';
+import type { ColorMode, RenderPreset, RenderSettings } from '@neuroforge/shared';
 
 /** Layer toggles, in the order they stack visually in the scene. */
 const LAYERS: { key: keyof RenderSettings; label: string }[] = [
@@ -32,6 +40,11 @@ export function ViewControls() {
 
   const setMode = useCallback(
     (mode: ColorMode) => setRenderSettings({ colorMode: mode }),
+    [setRenderSettings],
+  );
+
+  const applyPreset = useCallback(
+    (preset: RenderPreset) => setRenderSettings(RENDER_PRESET_PATCHES[preset]),
     [setRenderSettings],
   );
 
@@ -82,6 +95,21 @@ export function ViewControls() {
 
       {expanded ? (
         <div className="border-t border-hairline px-2 py-2">
+          <div className="mb-1 text-[10px] tracking-[0.08em] text-ink-faint uppercase">Look</div>
+          <div className="mb-2 flex gap-1">
+            {RENDER_PRESETS.map((preset) => (
+              <Tooltip key={preset} content={RENDER_PRESET_HINTS[preset]}>
+                <button
+                  type="button"
+                  onClick={() => applyPreset(preset)}
+                  className="flex-1 rounded-[4px] border border-hairline px-1.5 py-1 text-[10px] text-ink-muted transition-colors hover:border-hairline-strong hover:bg-panel-raised hover:text-ink"
+                >
+                  {RENDER_PRESET_LABELS[preset]}
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+
           <div className="mb-1 flex items-center gap-1.5">
             <Eye className="size-3 text-ink-faint" />
             <span className="text-[10px] tracking-[0.08em] text-ink-faint uppercase">

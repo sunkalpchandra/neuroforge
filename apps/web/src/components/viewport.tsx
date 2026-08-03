@@ -182,6 +182,15 @@ function Scene({ settings, onPick }: { settings: RenderSettings; onPick?: (slot:
 }
 
 function Post({ settings }: { settings: RenderSettings }) {
+  const gl = useThree((state) => state.gl);
+
+  // Exposure lives on the renderer, not in the effect chain, so switching a
+  // preset has to write it back — setting it only at canvas creation would leave
+  // every later change silently ignored.
+  useEffect(() => {
+    gl.toneMappingExposure = settings.exposure;
+  }, [gl, settings.exposure]);
+
   const aberration = useMemo(
     () => new THREE.Vector2(settings.chromaticAberration, settings.chromaticAberration),
     [settings.chromaticAberration],

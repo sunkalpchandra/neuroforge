@@ -163,20 +163,29 @@ export interface RenderSettings {
   saturation: number;
 }
 
+/**
+ * The default look is flat and crisp rather than cinematic.
+ *
+ * Glow, depth of field and chromatic aberration all destroy exactly the thing a
+ * connectome viewer exists to show: bloom bleeds one cell's colour into its
+ * neighbours, so two adjacent processes stop being separable, and defocus hides
+ * the far half of the field. Neuroglancer renders flat for this reason. The
+ * cinematic treatment is still one click away as a preset.
+ */
 export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
-  bloomIntensity: 1.15,
-  bloomThreshold: 0.62,
-  bloomRadius: 0.72,
-  depthOfField: true,
+  bloomIntensity: 0.3,
+  bloomThreshold: 0.86,
+  bloomRadius: 0.5,
+  depthOfField: false,
   focusDistance: 0.035,
   focalLength: 0.09,
   bokehScale: 3.2,
-  fogDensity: 0.0125,
+  fogDensity: 0.006,
   ambientOcclusion: true,
-  aoIntensity: 0.62,
-  vignette: 0.42,
-  chromaticAberration: 0.0009,
-  exposure: 1.05,
+  aoIntensity: 0.5,
+  vignette: 0.2,
+  chromaticAberration: 0,
+  exposure: 1,
   gridVisible: true,
   gridFade: 0.55,
   showDendrites: true,
@@ -228,3 +237,68 @@ export interface Snapshot {
   synapseCount: number;
   circuit: Circuit;
 }
+
+/**
+ * Named looks. `flat` is the default and matches how connectome viewers render;
+ * `cinematic` is the glow-heavy treatment, kept because it photographs well even
+ * though it makes adjacent processes harder to separate.
+ */
+export type RenderPreset = 'flat' | 'cinematic' | 'blueprint';
+
+export const RENDER_PRESETS: readonly RenderPreset[] = ['flat', 'cinematic', 'blueprint'] as const;
+
+export const RENDER_PRESET_LABELS: Record<RenderPreset, string> = {
+  flat: 'Flat',
+  cinematic: 'Cinematic',
+  blueprint: 'Blueprint',
+};
+
+export const RENDER_PRESET_HINTS: Record<RenderPreset, string> = {
+  flat: 'Crisp and unglowing, so adjacent processes stay separable.',
+  cinematic: 'Bloom, depth of field and grain. Photogenic, less legible.',
+  blueprint: 'Maximum contrast, no atmosphere, grid on. For reading topology.',
+};
+
+/** Only the appearance fields a preset controls; everything else is preserved. */
+export const RENDER_PRESET_PATCHES: Record<RenderPreset, Partial<RenderSettings>> = {
+  flat: {
+    bloomIntensity: 0.3,
+    bloomThreshold: 0.86,
+    bloomRadius: 0.5,
+    depthOfField: false,
+    fogDensity: 0.006,
+    ambientOcclusion: true,
+    aoIntensity: 0.5,
+    vignette: 0.2,
+    chromaticAberration: 0,
+    exposure: 1,
+    saturation: 1,
+  },
+  cinematic: {
+    bloomIntensity: 1.15,
+    bloomThreshold: 0.62,
+    bloomRadius: 0.72,
+    depthOfField: true,
+    fogDensity: 0.0125,
+    ambientOcclusion: true,
+    aoIntensity: 0.62,
+    vignette: 0.42,
+    chromaticAberration: 0.0009,
+    exposure: 1.05,
+    saturation: 1.05,
+  },
+  blueprint: {
+    bloomIntensity: 0,
+    bloomThreshold: 1,
+    bloomRadius: 0.2,
+    depthOfField: false,
+    fogDensity: 0,
+    ambientOcclusion: false,
+    aoIntensity: 0,
+    vignette: 0,
+    chromaticAberration: 0,
+    exposure: 1.1,
+    saturation: 1.2,
+    gridVisible: true,
+  },
+};
