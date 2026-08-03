@@ -70,6 +70,81 @@ export function syncSelectionFlags(
   }
 }
 
+/* ------------------------------------------------------------- camera ----- */
+
+export interface FrameRequest {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+let pendingFrame: FrameRequest | null = null;
+
+/**
+ * Ask the camera to ease onto a bounding box.
+ *
+ * The rig is owned by the R3F scene and the request comes from the keyboard map
+ * outside it, so it is left here for the render loop to pick up rather than
+ * reaching across the boundary. Only the most recent request survives: framing
+ * twice before a frame renders should land on the second target, not animate
+ * through the first.
+ */
+export function requestCameraFrame(request: FrameRequest): void {
+  pendingFrame = request;
+}
+
+/** Take the pending frame request, if any. Called once per rendered frame. */
+export function consumeCameraFrame(): FrameRequest | null {
+  const request = pendingFrame;
+  pendingFrame = null;
+  return request;
+}
+
+/**
+ * Bounding box of a set of neurons, read from the live positions.
+ * Returns null when nothing in `ids` resolves to a live slot.
+ */
+export function boundsOf(ids: readonly string[]): FrameRequest | null {
+  const engine = getEngine();
+  const { neurons } = engine.buffers;
+  const position = neurons.position;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  let found = 0;
+
+  const visit = (slot: number): void => {
+    const p = slot * 3;
+    const x = position[p];
+    const y = position[p + 1];
+    const z = position[p + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+    found += 1;
+  };
+
+  if (ids.length === 0) {
+    // Framing with an empty selection frames the whole network, which is what
+    // every 3D tool does and what a user pressing F on nothing expects.
+    for (let i = 0; i < neurons.count; i += 1) visit(i);
+  } else {
+    for (const id of ids) {
+      const slot = engine.slotOf(id);
+      if (slot >= 0 && slot < neurons.count) visit(slot);
+    }
+  }
+
+  if (found === 0) return null;
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
 /* ------------------------------------------------------------------ stats -- */
 
 type StatsListener = () => void;

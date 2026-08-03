@@ -28,7 +28,7 @@ import { createIntegrator, requestComputeDevice } from '@neuroforge/simulation';
 import { COLORS, DEFAULT_RENDER_SETTINGS } from '@neuroforge/shared';
 import type { RenderSettings } from '@neuroforge/shared';
 
-import { getEngine, getProbes, publishStats } from '@/lib/runtime';
+import { consumeCameraFrame, getEngine, getProbes, publishStats } from '@/lib/runtime';
 
 export interface ViewportProps {
   render?: RenderSettings;
@@ -70,6 +70,16 @@ function Loop({
     const dt = Math.min(delta, 1 / 20);
 
     engine.advance(dt);
+
+    // Framing is requested from outside the scene graph; the rig is only
+    // reachable here, so the request is picked up at the top of the frame.
+    const framing = consumeCameraFrame();
+    if (framing) {
+      fields.rig.frame(
+        new THREE.Vector3(framing.min[0], framing.min[1], framing.min[2]),
+        new THREE.Vector3(framing.max[0], framing.max[1], framing.max[2]),
+      );
+    }
 
     fields.rig.update(dt);
     fields.grid.update(camera, settings);

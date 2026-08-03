@@ -1,19 +1,24 @@
 'use client';
 
 import { useCallback, useEffect } from 'react';
-import { ToastViewport } from '@neuroforge/ui';
+import { ToastViewport, pushToast } from '@neuroforge/ui';
 import { buildShortcuts, useEditor } from '@neuroforge/editor';
-import { Autosaver } from '@neuroforge/io';
+import { Autosaver, createSnapshot } from '@neuroforge/io';
 import type { NeuronId } from '@neuroforge/shared';
 
 import { AiBuilder } from './builder/ai-builder';
+import { CommandPalette } from './command-palette';
+import { NetworkAnalysis } from './analysis/network-analysis';
+import { SearchPanel } from './search/search-panel';
+import { RasterPlot } from './analysis/raster-plot';
+import { LibraryPanel } from './library/library-panel';
 import { SelectionList } from './selection-list';
 import { ViewControls } from './view-controls';
 import { Inspector } from './inspector/inspector';
 import { StatusBar } from './status-bar';
 import { TopBar } from './top-bar';
 import { Viewport } from './viewport';
-import { getEngine, syncSelectionFlags } from '@/lib/runtime';
+import { boundsOf, getEngine, requestCameraFrame, syncSelectionFlags } from '@/lib/runtime';
 
 /** Match a KeyboardEvent against a shortcut descriptor like "Mod+Shift+Z". */
 function matches(event: KeyboardEvent, keys: string): boolean {
@@ -107,6 +112,49 @@ export function Workspace() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+
+  // buildShortcuts() dispatches these four as window events rather than acting
+  // directly, because the actions live outside the document the editor owns.
+  // Nothing was listening, so Space, R, F and Mod+S were inert.
+  useEffect(() => {
+    const onAction = (event: Event) => {
+      const detail = (event as CustomEvent<{ action?: string }>).detail;
+      switch (detail?.action) {
+        case 'play-pause': {
+          const engine = getEngine();
+          if (engine.running) engine.pause();
+          else engine.play();
+          break;
+        }
+        case 'reset':
+          getEngine().reset();
+          break;
+        case 'frame-selection': {
+          const bounds = boundsOf(useEditor.getState().selection);
+          if (bounds) requestCameraFrame(bounds);
+          break;
+        }
+        case 'snapshot': {
+          const current = useEditor.getState().circuit;
+          void createSnapshot(current, `Manual — ${current.name}`, false)
+            .then(() => pushToast({ tone: 'success', title: 'Snapshot saved' }))
+            .catch((error: unknown) =>
+              pushToast({
+                tone: 'danger',
+                title: 'Snapshot failed',
+                description: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          break;
+        }
+        default:
+          break;
+      }
+    };
+    window.addEventListener('neuroforge:shortcut', onAction);
+    return () => window.removeEventListener('neuroforge:shortcut', onAction);
+  }, []);
+
   useEffect(() => {
     const autosaver = new Autosaver(1500);
     autosaver.start(
@@ -132,10 +180,20 @@ export function Workspace() {
           <AiBuilder />
           <Inspector />
           <ViewControls />
+          <NetworkAnalysis />
+          <SearchPanel />
           <SelectionList />
+          <LibraryPanel />
         </div>
       </main>
+      {/* Docked rather than floated: the raster is read against the scene while
+          the simulation runs, so it takes its own band of the column instead of
+          covering the cells it is reporting on. */}
+      <RasterPlot />
       <StatusBar />
+      {/* Outside the panel layer: it portals to the body and owns the whole
+          viewport while it is open, so it must not inherit pointer-events-none. */}
+      <CommandPalette />
       <ToastViewport position="bottom-right" />
     </div>
   );
