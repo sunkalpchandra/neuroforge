@@ -225,7 +225,16 @@ interface GraphEdge {
   to: number;
   /** Summed peak conductance (nS). */
   weight: number;
-  /** Receptor carrying the most of that conductance. */
+  /**
+   * The connection's receptor.
+   *
+   * For a cell edge this is the receptor of the heaviest synapse between the
+   * pair, which is how `buildPathGraph` labels a folded connection and how the
+   * scene and the pathways panel colour the same wiring — a connection must not
+   * change hue depending on which panel is looking at it. For a population edge
+   * it is the receptor whose pairs carry the most summed conductance, each pair
+   * counted under the label above.
+   */
   receptor: ReceptorKind;
   /** Ordered cell pairs folded into this edge; 1 for a cell edge. */
   pairs: number;
@@ -240,11 +249,15 @@ interface GraphView {
   /** Node index per neuron slot, or −1; only built for the population view. */
   slotNode: Int32Array | null;
   hops: number;
-  /** Cells within the hop horizon before the cap, the seeds included. */
+  /**
+   * What the view could have drawn before the cap, in whatever unit it draws:
+   * cells in the hop horizon including the seeds (neighbourhood), cells in the
+   * network (network), occupied population buckets (population).
+   */
   reached: number;
   /** False when the discovery limit stopped the count short of the true figure. */
   reachedExact: boolean;
-  /** Cells the cap left undrawn. */
+  /** `reached` less what was drawn: what the cap left out. */
   omitted: number;
   /** Selected ids that no longer resolve to a live slot. */
   missingSeeds: number;
@@ -666,10 +679,28 @@ function buildPopulationView(
     netOut[bucket] += graph.outStart[slot + 1] - graph.outStart[slot];
   }
 
+  // The node cap holds here too. Populations are made one at a time and usually
+  // number in the tens, but an imported or generated circuit can carry thousands,
+  // and nothing downstream survives that: the pair index below is quadratic in
+  // the node count, and a force layout over thousands of groups is the same
+  // hairball the cell views cap to avoid. Largest first, so what survives is the
+  // part of the network most of the cells are in; ties to the lower bucket, so
+  // the view is reproducible.
+  const occupied: number[] = [];
+  for (let bucket = 0; bucket < buckets; bucket += 1) {
+    if (counts[bucket] > 0) occupied.push(bucket);
+  }
+  const kept =
+    occupied.length <= MAX_GRAPH_NODES
+      ? occupied
+      : [...occupied]
+          .sort((a, b) => counts[b] - counts[a] || a - b)
+          .slice(0, MAX_GRAPH_NODES)
+          .sort((a, b) => a - b);
+
   const nodeOfBucket = new Int32Array(buckets).fill(-1);
   const nodes: GraphNode[] = [];
-  for (let bucket = 0; bucket < buckets; bucket += 1) {
-    if (counts[bucket] === 0) continue;
+  for (const bucket of kept) {
     const unassigned = bucket === populationCount;
     nodeOfBucket[bucket] = nodes.length;
     nodes.push({
@@ -694,6 +725,8 @@ function buildPopulationView(
     });
   }
 
+  // −1 for a cell whose population the cap dropped, which is what keeps its
+  // edges out of the aggregation below and out of the click-to-select mapping.
   const slotNode = new Int32Array(n);
   for (let slot = 0; slot < n; slot += 1) slotNode[slot] = nodeOfBucket[bucketOf(slot)];
 
@@ -738,9 +771,9 @@ function buildPopulationView(
       buildMs: performance.now() - started,
       slotNode,
       hops: 0,
-      reached: n,
+      reached: occupied.length,
       reachedExact: true,
-      omitted: 0,
+      omitted: occupied.length - nodes.length,
       missingSeeds: 0,
       neurons: n,
     },
@@ -1535,6 +1568,10 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
   const signatureRef = useRef('');
   const dirtyRef = useRef(true);
   const costRef = useRef<number | null>(null);
+  const monoRef = useRef<{ canvas: HTMLCanvasElement | null; family: string }>({
+    canvas: null,
+    family: 'ui-monospace, monospace',
+  });
 
   /* -- topology ----------------------------------------------------------- */
 
@@ -1726,8 +1763,16 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
     }
 
     // The canvas carries `nf-numeric`, so its computed family is the same mono
-    // face the rest of the chrome prints in.
-    const mono = getComputedStyle(canvas).fontFamily || 'ui-monospace, monospace';
+    // face the rest of the chrome prints in. Resolved once per canvas element
+    // rather than per call: `paint` runs on every frame of a solve, the face
+    // cannot change between those frames, and `getComputedStyle` forces a style
+    // recalculation each time it is asked.
+    if (monoRef.current.canvas !== canvas) {
+      monoRef.current = {
+        canvas,
+        family: getComputedStyle(canvas).fontFamily || 'ui-monospace, monospace',
+      };
+    }
     paintGraph(ctx, surface.width, surface.height, surface.dpr, {
       view,
       layout,
@@ -1735,7 +1780,7 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
       viewport: viewportRef.current,
       hover,
       showLabels,
-      mono,
+      mono: monoRef.current.family,
     });
   }, [view, labels, surface, hover, showLabels]);
 
@@ -1833,11 +1878,22 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
     [],
   );
 
+  // Closing unmounts the canvas; reopening mounts a fresh, blank one. Nothing
+  // else would repaint it — the paint effect only fires when one of its inputs
+  // changes, and reopening at the same size changes none of them — and a layout
+  // that was still relaxing when the panel closed would never be handed another
+  // frame, leaving it frozen behind a "solving" badge that never clears.
   useEffect(() => {
-    if (open) return;
-    cancelAnimationFrame(frameRef.current);
-    runningRef.current = false;
-  }, [open]);
+    if (!open) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = 0;
+      runningRef.current = false;
+      return;
+    }
+    const layout = layoutRef.current;
+    if (layout !== null && !layout.settled) startLayout();
+    else paintRef.current();
+  }, [open, startLayout]);
 
   // A node index only means anything against the view it was measured on.
   useEffect(() => {
@@ -2181,7 +2237,7 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
               </Badge>
             </Tooltip>
           ) : view !== null ? (
-            <Tooltip content="Time taken by the last pass over the live buffers">
+            <Tooltip content="Time taken to derive this diagram from the indexed adjacency">
               <Badge variant="outline" size="sm" numeric tabIndex={0}>
                 {fixed(view.buildMs, 1)} ms
               </Badge>
@@ -2446,6 +2502,12 @@ export function NetworkGraph({ open = true, onClose, className }: NetworkGraphPr
                 {view.hops === 1 ? '' : 's'} — more than this view can draw legibly. The{' '}
                 {grouped(view.nodes.length)} most strongly connected are shown. Raise the weight
                 threshold or reduce the depth to see a whole neighbourhood.
+              </>
+            ) : view.mode === 'population' ? (
+              <>
+                Drawing the {grouped(view.nodes.length)} largest of {grouped(view.reached)}{' '}
+                populations; {grouped(view.omitted)} are not shown. Select cells to follow their
+                wiring outward instead.
               </>
             ) : (
               <>
