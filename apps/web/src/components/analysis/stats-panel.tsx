@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, RefreshCw, X } from 'lucide-react';
 import {
   Badge,
@@ -42,13 +42,39 @@ import { graphSignature } from '@/lib/graph-metrics';
 import { getEngine } from '@/lib/runtime';
 
 /**
- * Poll cadence for the buffer signature. Two integer reads; effectively free.
+ * Poll cadence for the live buffers. Two integer reads; effectively free.
  *
  * The engine is loaded by an effect in an ancestor which may commit after this
  * panel mounts, so the firing rates are not readable on the first pass. Polling
- * is what makes the panel correct regardless of that ordering.
+ * is what makes the panel correct regardless of that ordering, and it is also
+ * what keeps the rate histogram following a running simulation: the step
+ * counter advances while the network integrates and freezes when it is paused,
+ * so a poll that watches it resamples exactly when there is something new to
+ * see and never while nothing is moving.
  */
-const SIGNATURE_POLL_MS = 500;
+const LIVE_POLL_MS = 250;
+
+/**
+ * Cost above which the structural pass stops rebuilding itself.
+ *
+ * Measuring the whole document is O(cells + synapses) with a sort per series,
+ * which on a hundred-thousand-cell connectome is several hundred milliseconds —
+ * and the document is republished on every pointer move while a weight slider
+ * is dragged. Past this budget the panel reports itself stale rather than
+ * blocking the pointer, and the header's refresh control is what catches it up.
+ * A change in cell or synapse count rebuilds regardless: that is a different
+ * network, not a stale view of the same one.
+ */
+const AUTO_REBUILD_BUDGET_MS = 16;
+
+/**
+ * Longest a coalesced rebuild waits for the document to stop moving.
+ *
+ * The wait is normally the cost of the last pass, which is what makes a heavy
+ * circuit back off further than a light one. This caps it so that a pathological
+ * measurement cannot leave the panel stale for seconds after the last edit.
+ */
+const MAX_SETTLE_MS = 750;
 
 /** Maximum columns in a histogram. More than this and a column is sub-pixel. */
 const HIST_BINS = 40;
@@ -63,6 +89,18 @@ const PLOT_H = BASELINE - PLOT_TOP;
 
 /** Cells listed when a bin is opened. Enough to recognise a tail, not a table. */
 const FOCUS_ROW_LIMIT = 16;
+
+/**
+ * Hue generator for a population swatch, reproducing `writeTint` in the renderer.
+ *
+ * The scene derives a group's colour from its ordinal in `circuit.populations`
+ * — that ordinal is what the neuron buffer's `population` column holds — offset
+ * so group hues do not collide with the per-cell identity sequence. Matching it
+ * exactly is what makes a row in this panel and a cluster in the viewport read
+ * as the same thing.
+ */
+const POPULATION_HUE_SALT = 0x9e37;
+const POPULATION_HUE_STRIDE = 2654435761;
 
 /* -------------------------------------------------------------------- model -- */
 
@@ -150,6 +188,15 @@ interface StatsModel {
   cells: number;
   /** Synapses with at least one endpoint in the subset. */
   synapses: number;
+  /**
+   * Document indices of the measured cells.
+   *
+   * Kept so that resampling the one live quantity does not have to resolve the
+   * selection and rebuild the structure around it: the subset a rate belongs to
+   * only changes when the document or the scope does, and both rebuild this
+   * whole model anyway.
+   */
+  subset: Int32Array;
 
   rate: Distribution;
   inDegree: Distribution;
@@ -176,6 +223,8 @@ interface StatsModel {
 interface Focus {
   /** Distribution or category chart the bin belongs to. */
   key: string;
+  /** Category row that was opened; null when the focus came from a histogram. */
+  row: string | null;
   kind: SampleKind;
   label: string;
   unit: string;
@@ -248,7 +297,12 @@ function binLow(distribution: Distribution, bin: number): number {
  */
 function binHigh(distribution: Distribution, bin: number): number {
   const low = binLow(distribution, bin);
-  return distribution.integral ? low + distribution.binWidth - 1 : low + distribution.binWidth;
+  const high = distribution.integral
+    ? low + distribution.binWidth - 1
+    : low + distribution.binWidth;
+  // The last bin of an integer histogram can run past the data: bins are a whole
+  // number of degrees wide and the range rarely divides by that width evenly.
+  return high > distribution.max ? distribution.max : high;
 }
 
 function binLabel(distribution: Distribution, bin: number): string {
@@ -256,7 +310,7 @@ function binLabel(distribution: Distribution, bin: number): string {
   const high = binHigh(distribution, bin);
   const unit = distribution.unit === '' ? '' : ` ${distribution.unit}`;
   if (distribution.integral) {
-    if (distribution.binWidth <= 1) return `${grouped(low)}${unit}`;
+    if (low >= high) return `${grouped(low)}${unit}`;
     return `${grouped(low)}–${grouped(high)}${unit}`;
   }
   if (distribution.binCount <= 1) return `${fixed(low, distribution.precision)}${unit}`;
@@ -472,6 +526,42 @@ function withUnit(value: number, unit: string, precision: number): string {
 
 const EMPTY_SUBSET = new Int32Array(0);
 
+const RATE_SPEC: DistributionSpec = {
+  key: 'rate',
+  label: 'Firing rate',
+  unit: 'Hz',
+  axis: 'firing rate (Hz)',
+  hint: 'Exponentially smoothed spike rate read from the running network, resampled while the simulation steps. Cells whose slot has not been allocated yet are excluded rather than counted as silent.',
+  kind: 'neuron',
+  precision: 2,
+  integral: false,
+};
+
+/**
+ * The one live distribution, read straight from the running network.
+ *
+ * Split out of the structural pass because it is the only quantity here that
+ * moves without the document moving. Following it costs a lookup and a read per
+ * measured cell — a fraction of the pass that counts every synapse and sorts a
+ * dozen parameter columns — so the panel can resample this several times a
+ * second while rebuilding the rest only when the circuit itself changes.
+ */
+function sampleRate(neurons: readonly Neuron[], subset: Int32Array): Distribution {
+  const engine = getEngine();
+  const live = engine.buffers.neurons;
+  const rateColumn = live.rate;
+  const liveCount = live.count;
+  return buildDistribution(
+    RATE_SPEC,
+    collect(subset, (index) => {
+      const neuron = neurons[index];
+      if (neuron === undefined) return Number.NaN;
+      const slot = engine.slotOf(neuron.id);
+      return slot >= 0 && slot < liveCount ? rateColumn[slot] : Number.NaN;
+    }),
+  );
+}
+
 /**
  * Every distribution in the panel, from one pass over the document plus one read
  * of the live rate column.
@@ -553,27 +643,7 @@ function computeStats(
 
   /* -- activity ------------------------------------------------------------ */
 
-  const engine = getEngine();
-  const live = engine.buffers.neurons;
-  const rateColumn = live.rate;
-  const liveCount = live.count;
-
-  const rate = buildDistribution(
-    {
-      key: 'rate',
-      label: 'Firing rate',
-      unit: 'Hz',
-      axis: 'firing rate (Hz)',
-      hint: 'Exponentially smoothed spike rate read from the running network. Cells whose slot has not been allocated yet are excluded rather than counted as silent.',
-      kind: 'neuron',
-      precision: 2,
-      integral: false,
-    },
-    collect(subset, (index) => {
-      const slot = engine.slotOf(neurons[index].id);
-      return slot >= 0 && slot < liveCount ? rateColumn[slot] : Number.NaN;
-    }),
-  );
+  const rate = sampleRate(neurons, subset);
 
   /* -- topology ------------------------------------------------------------ */
 
@@ -690,8 +760,14 @@ function computeStats(
 
   /* -- categorical breakdowns ---------------------------------------------- */
 
+  // Index as well as identity: the scene tints a population by its ordinal in
+  // this array, so reproducing its colour needs the position, not just the row.
   const populationById = new Map<string, Population>();
-  for (const population of populations) populationById.set(population.id, population);
+  const populationOrder = new Map<string, number>();
+  for (let i = 0; i < populations.length; i += 1) {
+    populationById.set(populations[i].id, populations[i]);
+    populationOrder.set(populations[i].id, i);
+  }
 
   const categories: CategoryChart[] = [
     buildCategory(
@@ -704,7 +780,7 @@ function computeStats(
       subset,
       (index) => neurons[index].params.kind,
       (bucket) => ({
-        label: NEURON_MODEL_LABELS[bucket as NeuronModelKind] ?? bucket,
+        label: NEURON_MODEL_LABELS[bucket as NeuronModelKind],
         color: 'var(--color-accent)',
       }),
       NEURON_MODEL_KINDS,
@@ -751,11 +827,18 @@ function computeStats(
         if (population === undefined) {
           return { label: 'Unassigned', color: 'var(--color-ink-faint)' };
         }
-        // The population's own hue, from the same generator its cells are drawn
-        // with, so a row here and a cluster in the scene are the same object.
+        // The hue the renderer tints this group with under `population` colour
+        // mode, so a row here and a cluster in the scene are the same object. It
+        // is derived from the group's ordinal rather than from its morphology
+        // seed, because the ordinal is all the buffers carry — an explicit
+        // colour on the document overrides both, as it does everywhere else in
+        // the chrome.
+        const ordinal = populationOrder.get(population.id) ?? 0;
         return {
           label: population.name,
-          color: population.color ?? identityColorHex(population.morphology.seed),
+          color:
+            population.color ??
+            identityColorHex(ordinal * POPULATION_HUE_STRIDE + POPULATION_HUE_SALT),
         };
       },
       null,
@@ -770,8 +853,8 @@ function computeStats(
       incident,
       (index) => synapses[index].receptor,
       (bucket) => ({
-        label: RECEPTOR_LABELS[bucket as keyof typeof RECEPTOR_LABELS] ?? bucket,
-        color: RECEPTOR_COLORS[bucket as keyof typeof RECEPTOR_COLORS] ?? 'var(--color-accent)',
+        label: RECEPTOR_LABELS[bucket as keyof typeof RECEPTOR_LABELS],
+        color: RECEPTOR_COLORS[bucket as keyof typeof RECEPTOR_COLORS],
       }),
       RECEPTOR_KINDS,
     ),
@@ -782,6 +865,7 @@ function computeStats(
     scope,
     cells: subset.length,
     synapses: incidentCount,
+    subset,
     rate,
     inDegree,
     outDegree,
@@ -797,9 +881,44 @@ function computeStats(
 /* -------------------------------------------------------------------- panel -- */
 
 const SCALE_OPTIONS = [
-  { value: 'linear' as const, label: 'linear', title: 'Linear count axis' },
-  { value: 'log' as const, label: 'log', title: 'Logarithmic count axis' },
+  {
+    value: 'linear' as const,
+    label: 'linear',
+    title: 'Linear count axis — true areas, but a heavy tail is invisible',
+  },
+  {
+    value: 'log' as const,
+    label: 'log',
+    title: 'Logarithmic count axis — shows the tail of a heavy-tailed distribution',
+  },
 ];
+
+const EMPTY_NEURONS: readonly Neuron[] = [];
+const EMPTY_SYNAPSES: readonly Synapse[] = [];
+
+/**
+ * A measurement and the document it measured.
+ *
+ * The two travel together because every index in the model — the owners behind a
+ * histogram bar, the members of a category — points into these exact arrays. The
+ * live document can be several edits ahead of a stale measurement, and resolving
+ * an old index against a new array names the wrong cell.
+ */
+interface Snapshot {
+  model: StatsModel;
+  neurons: readonly Neuron[];
+  synapses: readonly Synapse[];
+}
+
+/**
+ * State of the running network, as a value that changes exactly when a resample
+ * would show something new: the buffer sizes, and the step counter that advances
+ * while the network integrates and holds still while it is paused.
+ */
+function liveMark(): string {
+  const buffers = getEngine().buffers;
+  return `${graphSignature(buffers)}:${buffers.step}`;
+}
 
 export interface StatsPanelProps {
   /** Rendered only when true, so a host can toggle it like the other panels. */
@@ -820,11 +939,17 @@ export interface StatsPanelProps {
  * why a bar is a control: reaching into the tail and selecting the dozen cells
  * that live there is the question a statistics view exists to answer.
  *
- * The whole model is one `useMemo` over the document arrays and the selection.
- * Those arrays are sliced out of the store rather than taken from `circuit`,
- * because the store republishes the document on every camera orbit frame and
- * re-measuring a hundred thousand cells at 144 Hz would cost more than the
- * simulation being measured.
+ * The document arrays are sliced out of the store rather than taken from
+ * `circuit`, because the store republishes the document on every camera orbit
+ * frame and re-measuring a hundred thousand cells at 144 Hz would cost more than
+ * the simulation being measured.
+ *
+ * The measurement itself is held in state rather than derived in a `useMemo`,
+ * because a memo has no way to decline. The structural pass is O(cells +
+ * synapses) with a sort per series, and the document is republished on every
+ * pointer move while a weight slider is dragged; a memo would run that pass on
+ * each of those frames and stall the drag. Held here it can be budgeted, and a
+ * pass too expensive to repeat leaves the panel visibly stale instead.
  */
 export function StatsPanel({ open = true, onClose, className }: StatsPanelProps) {
   const neurons = useEditor((s) => s.circuit.neurons);
@@ -837,26 +962,149 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
   const [scale, setScale] = useState<CountScale>('log');
   const [requestedModel, setRequestedModel] = useState<NeuronModelKind | null>(null);
   const [focus, setFocus] = useState<Focus | null>(null);
-  /**
-   * Bumped when the live buffers are worth re-reading. Firing rate is the only
-   * quantity here that changes without the document changing, and it moves every
-   * step — so it is sampled on demand rather than followed.
-   */
-  const [sample, setSample] = useState(0);
 
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  /**
+   * Live rate distribution replacing the one the structural pass captured.
+   *
+   * Null means the structural pass is the freshest reading there is, which is
+   * true immediately after every rebuild.
+   */
+  const [liveRate, setLiveRate] = useState<Distribution | null>(null);
+  const [pending, setPending] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /**
+   * Inputs the next pass will measure.
+   *
+   * A ref rather than a dependency because the pass is deferred by a frame: what
+   * it must measure is whatever the document holds when it finally runs, not
+   * whatever it held when the rebuild was requested. It is published from the
+   * first effect in the component so that every effect below — all of which can
+   * request a pass — is looking at the commit's own inputs.
+   */
+  const inputsRef = useRef({ neurons, synapses, populations, selection, preferred, requestedModel });
+  useEffect(() => {
+    inputsRef.current = { neurons, synapses, populations, selection, preferred, requestedModel };
+  }, [neurons, synapses, populations, selection, preferred, requestedModel]);
+
+  const busyRef = useRef(false);
+  const frameRef = useRef(0);
+  /** Cost of the last completed structural pass; null until one has run. */
+  const costRef = useRef<number | null>(null);
+  /** Buffer state the live rate was last read at. */
+  const liveRef = useRef('');
+
+  const rebuild = useCallback(() => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setPending(true);
+    // Yield a frame so the busy state paints before the blocking pass.
+    frameRef.current = requestAnimationFrame(() => {
+      try {
+        const input = inputsRef.current;
+        const model = computeStats(
+          input.neurons,
+          input.synapses,
+          input.populations,
+          input.selection,
+          input.preferred,
+          input.requestedModel,
+        );
+        costRef.current = model.computeMs;
+        // The structural pass just read the rate column, so the live overlay
+        // is behind it by definition until the next poll finds a newer step.
+        liveRef.current = liveMark();
+        setLiveRate(null);
+        setSnapshot({ model, neurons: input.neurons, synapses: input.synapses });
+        setStale(false);
+        setError(null);
+      } catch (cause) {
+        // The busy latch is what stops the callers below from stampeding, so it
+        // has to be released on the failing path too.
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setPending(false);
+        busyRef.current = false;
+      }
+    });
+  }, []);
+
+  useEffect(
+    () => () => {
+      // A cancelled frame never reaches the `finally` above, so both the latch
+      // and the spinner it drives have to be released here.
+      cancelAnimationFrame(frameRef.current);
+      busyRef.current = false;
+    },
+    [],
+  );
+
+  /**
+   * Rebuild when the document moves, unless the last pass was too expensive to
+   * repeat at the rate the document is moving.
+   *
+   * A change in cell or synapse count is exempt: that is a different network,
+   * and showing the old one's statistics under the new one's header would be
+   * wrong rather than merely late.
+   *
+   * Everything else coalesces. A weight slider republishes the document on every
+   * pointer move, and a pass that takes longer than a frame cannot run on each
+   * of them; instead the panel says it is behind and schedules one pass for when
+   * the document stops moving. The delay is the measured cost of the last pass,
+   * so the throttle tunes itself to the circuit rather than to a guess, and the
+   * timer is restarted by each further edit — which means it settles rather than
+   * repeating.
+   */
+  const cells = neurons.length;
+  const wires = synapses.length;
+  const sizeRef = useRef('');
   useEffect(() => {
     if (!open) return;
-    let last = '';
+    const size = `${cells}:${wires}`;
+    const resized = sizeRef.current !== size;
+    sizeRef.current = size;
+    const cost = costRef.current;
+    if (resized || cost === null || cost <= AUTO_REBUILD_BUDGET_MS) {
+      rebuild();
+      return;
+    }
+    setStale(true);
+    const id = setTimeout(rebuild, Math.min(cost, MAX_SETTLE_MS));
+    return () => clearTimeout(id);
+  }, [open, cells, wires, neurons, synapses, populations, selection, rebuild]);
+
+  // Scope and model are the user asking a different question, not the document
+  // drifting: those always run, however expensive the last pass was.
+  const firstRef = useRef(true);
+  useEffect(() => {
+    if (!open) return;
+    if (firstRef.current) {
+      firstRef.current = false;
+      return;
+    }
+    rebuild();
+  }, [open, preferred, requestedModel, rebuild]);
+
+  // Firing rate is the only quantity that moves without the document moving.
+  // Resampling it touches the measured cells and nothing else, which is what
+  // makes following a running network affordable when a full pass is not.
+  const subset = snapshot?.model.subset;
+  const snapshotNeurons = snapshot?.neurons;
+  useEffect(() => {
+    if (!open || subset === undefined || snapshotNeurons === undefined) return;
     const poll = () => {
-      const signature = graphSignature(getEngine().buffers);
-      if (signature === last) return;
-      last = signature;
-      setSample((value) => value + 1);
+      if (busyRef.current) return;
+      const mark = liveMark();
+      if (mark === liveRef.current) return;
+      liveRef.current = mark;
+      setLiveRate(sampleRate(snapshotNeurons, subset));
     };
     poll();
-    const id = setInterval(poll, SIGNATURE_POLL_MS);
+    const id = setInterval(poll, LIVE_POLL_MS);
     return () => clearInterval(id);
-  }, [open]);
+  }, [open, subset, snapshotNeurons]);
 
   // An opened bin holds document indices. Any edit to the collections can move
   // what those indices name, so the capture is dropped rather than allowed to
@@ -865,23 +1113,20 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
     setFocus(null);
   }, [neurons, synapses]);
 
-  const stats = useMemo(() => {
-    if (!open) return null;
-    // `sample` is a dependency rather than a value: it is what makes a refresh
-    // re-read the live rate column.
-    void sample;
-    return computeStats(neurons, synapses, populations, selection, preferred, requestedModel);
-  }, [open, neurons, synapses, populations, selection, preferred, requestedModel, sample]);
+  const stats = snapshot?.model ?? null;
+  // Everything the focus resolves against has to come from the same document the
+  // measurement indexed, or a stale index names the wrong cell.
+  const measuredNeurons = snapshot?.neurons ?? EMPTY_NEURONS;
+  const measuredSynapses = snapshot?.synapses ?? EMPTY_SYNAPSES;
 
   const focusRows = useMemo<readonly FocusRow[]>(() => {
     if (focus === null) return [];
     const limit = Math.min(focus.members.length, FOCUS_ROW_LIMIT);
     const rows: FocusRow[] = [];
-    for (let i = 0; i < limit; i += 1) {
-      const index = focus.members[i];
-      const value = focus.values === null ? null : focus.values[i];
-      if (focus.kind === 'neuron') {
-        const neuron = neurons[index];
+
+    if (focus.kind === 'neuron') {
+      for (let i = 0; i < limit; i += 1) {
+        const neuron = measuredNeurons[focus.members[i]];
         if (neuron === undefined) continue;
         rows.push({
           key: neuron.id,
@@ -889,15 +1134,24 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
           toColor: null,
           label: neuron.label.length > 0 ? neuron.label : neuron.id.slice(0, 8),
           detail: NEURON_MODEL_LABELS[neuron.params.kind],
-          value,
+          value: focus.values === null ? null : focus.values[i],
           ids: [neuron.id],
         });
-        continue;
       }
-      const synapse = synapses[index];
+      return rows;
+    }
+
+    // One index over the document rather than a scan per endpoint, which would
+    // be O(rows · neurons) — a hundred-thousand-cell circuit would spend longer
+    // naming sixteen synapses than it spent measuring the whole network.
+    const byId = new Map<string, Neuron>();
+    for (const neuron of measuredNeurons) byId.set(neuron.id, neuron);
+
+    for (let i = 0; i < limit; i += 1) {
+      const synapse = measuredSynapses[focus.members[i]];
       if (synapse === undefined) continue;
-      const source = neurons.find((candidate) => candidate.id === synapse.source);
-      const target = neurons.find((candidate) => candidate.id === synapse.target);
+      const source = byId.get(synapse.source);
+      const target = byId.get(synapse.target);
       if (source === undefined || target === undefined) continue;
       rows.push({
         key: synapse.id,
@@ -905,12 +1159,12 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
         toColor: identityColorHex(target.morphology.seed),
         label: source.label.length > 0 ? source.label : source.id.slice(0, 8),
         detail: target.label.length > 0 ? target.label : target.id.slice(0, 8),
-        value,
+        value: focus.values === null ? null : focus.values[i],
         ids: [source.id, target.id],
       });
     }
     return rows;
-  }, [focus, neurons, synapses]);
+  }, [focus, measuredNeurons, measuredSynapses]);
 
   /** Cells a set of members resolves to, deduplicated and in document order. */
   const neuronsOf = useCallback(
@@ -918,7 +1172,7 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       if (kind === 'neuron') {
         const ids: NeuronId[] = [];
         for (let i = 0; i < members.length; i += 1) {
-          const neuron = neurons[members[i]];
+          const neuron = measuredNeurons[members[i]];
           if (neuron !== undefined) ids.push(neuron.id);
         }
         return ids;
@@ -926,7 +1180,7 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       const seen = new Set<string>();
       const ids: NeuronId[] = [];
       for (let i = 0; i < members.length; i += 1) {
-        const synapse = synapses[members[i]];
+        const synapse = measuredSynapses[members[i]];
         if (synapse === undefined) continue;
         // Both endpoints: a synapse is not selectable on its own here, and the
         // pair is what "the cells in this bin" means for a wiring attribute.
@@ -941,16 +1195,19 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       }
       return ids;
     },
-    [neurons, synapses],
+    [measuredNeurons, measuredSynapses],
   );
 
   const pickBin = useCallback(
     (distribution: Distribution, bin: number) => {
-      const size = distribution.counts[bin] ?? 0;
+      if (bin < 0 || bin >= distribution.binCount) return;
+      const size = distribution.counts[bin];
       if (size === 0) return;
       const members = new Int32Array(size);
       const values = new Float32Array(size);
       let kept = 0;
+      // Membership is re-derived through `binOf` rather than compared against
+      // the bin's edges, so a sample can never land in two bins at a boundary.
       for (let i = 0; i < distribution.n && kept < size; i += 1) {
         if (binOf(distribution, distribution.values[i]) !== bin) continue;
         members[kept] = distribution.owners[i];
@@ -959,6 +1216,7 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       }
       setFocus({
         key: distribution.key,
+        row: null,
         kind: distribution.kind,
         label: `${distribution.label} ${binLabel(distribution, bin)}`,
         unit: distribution.unit,
@@ -978,6 +1236,7 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       if (row.count === 0) return;
       setFocus({
         key: chart.key,
+        row: row.key,
         kind: chart.kind,
         label: `${chart.label} · ${row.label}`,
         unit: '',
@@ -1011,19 +1270,29 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
       icon={<BarChart3 />}
       actions={
         <>
-          {stats !== null ? (
-            <Tooltip content={`One pass over ${grouped(stats.cells)} cells and ${grouped(stats.synapses)} synapses`}>
+          {pending ? (
+            <Badge variant="outline" size="sm">
+              measuring
+            </Badge>
+          ) : stale ? (
+            <Tooltip content="The circuit has changed since this was measured. Measuring it again costs more than a frame, so the pass is waiting for the edits to stop — or refresh to take it now.">
+              <Badge variant="warning" size="sm" dot tabIndex={0}>
+                stale
+              </Badge>
+            </Tooltip>
+          ) : stats !== null ? (
+            <Tooltip
+              content={`One pass over ${grouped(stats.cells)} cells and ${grouped(
+                stats.synapses,
+              )} synapses`}
+            >
               <Badge variant="outline" size="sm" numeric tabIndex={0}>
                 {fixed(stats.computeMs, 1)} ms
               </Badge>
             </Tooltip>
           ) : null}
           <Tooltip content="Re-read the live firing rates and rebuild every distribution">
-            <IconButton
-              label="Recompute statistics"
-              size="sm"
-              onClick={() => setSample((value) => value + 1)}
-            >
+            <IconButton label="Recompute statistics" size="sm" onClick={rebuild}>
               <RefreshCw />
             </IconButton>
           </Tooltip>
@@ -1037,7 +1306,37 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
     />
   );
 
-  if (stats === null || neurons.length === 0) {
+  if (error !== null) {
+    return (
+      <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
+        {header}
+        <EmptyState
+          icon={<BarChart3 />}
+          title="Could not measure this circuit"
+          description={error}
+        />
+      </Panel>
+    );
+  }
+
+  if (stats === null) {
+    return (
+      <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
+        {header}
+        <EmptyState
+          icon={<BarChart3 />}
+          title={neurons.length === 0 ? 'Nothing to measure' : 'Measuring'}
+          description={
+            neurons.length === 0
+              ? 'Place neurons and wire them together, then this panel reports the distribution of every attribute across the circuit or across whatever you have selected.'
+              : `Reading ${grouped(neurons.length)} cells and ${grouped(synapses.length)} synapses.`
+          }
+        />
+      </Panel>
+    );
+  }
+
+  if (stats.cells === 0) {
     return (
       <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
         {header}
@@ -1050,6 +1349,10 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
     );
   }
 
+  // The live overlay is the same distribution resampled off the running network;
+  // until the first poll finds a newer step it is the structural pass's own read.
+  const rate = liveRate ?? stats.rate;
+
   const chartProps = {
     log: scale === 'log',
     focus,
@@ -1059,7 +1362,8 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
     onSelectRow: (row: FocusRow) => select(row.ids),
   };
 
-  const model = stats.models.find((entry) => entry.kind === stats.paramKind) ?? null;
+  const paramKind = stats.paramKind;
+  const model = stats.models.find((entry) => entry.kind === paramKind) ?? null;
   const varying = stats.params.filter((series) => !series.constant && series.distribution.n > 0);
   const constants = stats.params.filter((series) => series.constant);
 
@@ -1089,16 +1393,17 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
             />
           }
         >
-          <p className="nf-numeric text-[10.5px] leading-relaxed text-ink-muted">
-            n = <span className="text-ink">{grouped(stats.cells)}</span> cells ·{' '}
-            <span className="text-ink">{grouped(stats.synapses)}</span> incident synapses ·
-            computed in <span className="text-ink">{fixed(stats.computeMs, 2)} ms</span>
+          <p className="text-[10.5px] leading-relaxed text-ink-muted">
+            n = <span className="nf-numeric text-ink">{grouped(stats.cells)}</span> cells ·{' '}
+            <span className="nf-numeric text-ink">{grouped(stats.synapses)}</span>{' '}
+            {stats.scope === 'selection' ? 'incident synapses' : 'synapses'} · computed in{' '}
+            <span className="nf-numeric text-ink">{fixed(stats.computeMs, 2)} ms</span>
           </p>
           <p className="text-[9.5px] leading-relaxed text-ink-faint">
             {stats.scope === 'selection'
-              ? 'Degrees count the whole circuit; synapse statistics cover every connection touching the selection.'
+              ? 'Degrees are counted over the whole circuit; the synapse statistics cover every connection touching the selection.'
               : selection.length === 0
-                ? 'Select cells in the scene to narrow every distribution to them.'
+                ? 'Select cells in the scene, or pick a histogram bar below, to narrow every distribution to them.'
                 : 'Measuring the whole circuit while a selection exists.'}
           </p>
           <MarkerLegend />
@@ -1107,32 +1412,30 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
         <PanelSection
           label="Activity"
           aside={
-            stats.rate.n === 0 ? (
+            rate.n === 0 ? (
               <Badge variant="outline" size="sm">
                 no live cells
               </Badge>
-            ) : stats.rate.max === 0 ? (
+            ) : rate.max === 0 ? (
               <Badge variant="warning" size="sm">
-                not run
+                all silent
               </Badge>
             ) : null
           }
         >
-          <SeriesChart dist={stats.rate} color="var(--color-success)" {...chartProps} />
+          <SeriesChart dist={rate} color="var(--color-success)" {...chartProps} />
         </PanelSection>
 
         <PanelSection
           label="Degree"
           aside={
-            <Tooltip content="Count axis for every histogram in this panel. Degree distributions are heavy-tailed; on a linear axis the whole network collapses into the first column.">
-              <SegmentedControl
-                size="sm"
-                value={scale}
-                onChange={setScale}
-                options={SCALE_OPTIONS}
-                aria-label="Count axis scale"
-              />
-            </Tooltip>
+            <SegmentedControl
+              size="sm"
+              value={scale}
+              onChange={setScale}
+              options={SCALE_OPTIONS}
+              aria-label="Count axis scale"
+            />
           }
         >
           <SeriesChart dist={stats.inDegree} color="var(--color-accent)" {...chartProps} />
@@ -1142,6 +1445,11 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
             className="mt-3"
             {...chartProps}
           />
+          <p className="text-[9px] leading-relaxed text-ink-faint">
+            Degree distributions are heavy-tailed: on a linear count axis almost every
+            cell falls in the first column and the hubs vanish. The scale here governs
+            every histogram in the panel.
+          </p>
         </PanelSection>
 
         <PanelSection label="Synapses">
@@ -1157,10 +1465,10 @@ export function StatsPanel({ open = true, onClose, className }: StatsPanelProps)
         <PanelSection
           label="Membrane parameters"
           aside={
-            stats.models.length > 1 && stats.paramKind !== null ? (
+            stats.models.length > 1 && paramKind !== null ? (
               <Select
                 size="sm"
-                value={stats.paramKind}
+                value={paramKind}
                 onValueChange={(value) => setRequestedModel(value as NeuronModelKind)}
                 aria-label="Membrane model"
                 contentClassName="min-w-[220px]"
@@ -1329,16 +1637,31 @@ function SeriesChart({
   className,
 }: SeriesChartProps) {
   const [cursor, setCursor] = useState(-1);
-  const focused = focus !== null && focus.key === dist.key;
+  const active = focus !== null && focus.key === dist.key ? focus : null;
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<SVGSVGElement>) => {
       if (dist.binCount === 0) return;
+      const last = dist.binCount - 1;
+      // Nothing is highlighted until a key arrives, so the first one lands on an
+      // end of the axis rather than stepping away from a bin the user never saw.
+      if (cursor < 0) {
+        if (event.key === 'ArrowRight' || event.key === 'Home') {
+          event.preventDefault();
+          setCursor(0);
+          return;
+        }
+        if (event.key === 'ArrowLeft' || event.key === 'End') {
+          event.preventDefault();
+          setCursor(last);
+          return;
+        }
+      }
       const current = cursor < 0 ? 0 : cursor;
       switch (event.key) {
         case 'ArrowRight':
           event.preventDefault();
-          setCursor(Math.min(dist.binCount - 1, current + 1));
+          setCursor(Math.min(last, current + 1));
           return;
         case 'ArrowLeft':
           event.preventDefault();
@@ -1350,7 +1673,7 @@ function SeriesChart({
           return;
         case 'End':
           event.preventDefault();
-          setCursor(dist.binCount - 1);
+          setCursor(last);
           return;
         case 'Enter':
         case ' ':
@@ -1390,7 +1713,7 @@ function SeriesChart({
   const markerX = (value: number): number => {
     if (axisSpan <= 0) return CHART_W / 2;
     const t = (value - dist.min + centred) / axisSpan;
-    return Math.min(CHART_W, Math.max(0, t)) * CHART_W === 0 ? 0 : Math.min(1, Math.max(0, t)) * CHART_W;
+    return (t < 0 ? 0 : t > 1 ? 1 : t) * CHART_W;
   };
 
   const heightOf = (count: number): number => {
@@ -1456,7 +1779,10 @@ function SeriesChart({
           const low = binLow(dist, bin);
           const high = binHigh(dist, bin);
           const inFocus =
-            focused && Number.isFinite(focus.lo) && low >= focus.lo - 1e-9 && high <= focus.hi + 1e-9;
+            active !== null &&
+            Number.isFinite(active.lo) &&
+            low >= active.lo - 1e-9 &&
+            high <= active.hi + 1e-9;
           const height = heightOf(count);
           return (
             <g key={bin}>
@@ -1467,8 +1793,9 @@ function SeriesChart({
                 y={0}
                 width={Math.max(slot, 1)}
                 height={BASELINE}
-                fill={cursor === bin ? 'var(--color-ink)' : 'transparent'}
+                fill="var(--color-ink)"
                 opacity={cursor === bin ? 0.06 : 0}
+                pointerEvents="all"
                 className={count > 0 ? 'cursor-pointer' : undefined}
                 onClick={() => {
                   if (count === 0) return;
@@ -1569,9 +1896,9 @@ function SeriesChart({
         </span>
       </div>
 
-      {focused ? (
+      {active !== null ? (
         <FocusList
-          focus={focus}
+          focus={active}
           rows={focusRows}
           onClear={onClearFocus}
           onSelectRow={onSelectRow}
@@ -1676,7 +2003,7 @@ function CategoryBars({
   onClearFocus,
   onSelectRow,
 }: CategoryBarsProps) {
-  const focused = focus !== null && focus.key === chart.key;
+  const active = focus !== null && focus.key === chart.key ? focus : null;
   const noun = chart.kind === 'neuron' ? 'cells' : 'synapses';
 
   if (chart.rows.length === 0) {
@@ -1689,17 +2016,17 @@ function CategoryBars({
     <>
       <ul className="flex flex-col">
         {chart.rows.map((row) => {
-          const active = focused && focus.label.endsWith(`· ${row.label}`);
+          const open = active !== null && active.row === row.key;
           return (
             <li key={row.key}>
               <button
                 type="button"
                 onClick={() => onPick(chart, row)}
-                aria-pressed={active}
+                aria-pressed={open}
                 className={cn(
                   'flex w-full flex-col gap-0.5 rounded-control px-1 py-1 text-left',
                   'transition-colors hover:bg-panel-raised focus-visible:bg-panel-raised',
-                  active && 'bg-white/[0.07]',
+                  open && 'bg-white/[0.07]',
                 )}
               >
                 <span className="flex items-baseline gap-1.5 text-[10.5px]">
@@ -1737,9 +2064,9 @@ function CategoryBars({
         {grouped(chart.total)} {noun} · {grouped(chart.rows.length)} categor
         {chart.rows.length === 1 ? 'y' : 'ies'}
       </p>
-      {focused ? (
+      {active !== null ? (
         <FocusList
-          focus={focus}
+          focus={active}
           rows={focusRows}
           onClear={onClearFocus}
           onSelectRow={onSelectRow}

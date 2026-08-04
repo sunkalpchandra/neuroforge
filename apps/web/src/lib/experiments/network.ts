@@ -90,16 +90,20 @@ export const FREQUENCY_BANDS: readonly FrequencyBand[] = [
 ];
 
 export function bandFor(hz: number): FrequencyBand | null {
-  for (const band of FREQUENCY_BANDS) {
-    if (hz >= band.lowHz && hz < band.highHz) return band;
-  }
-  return null;
+  const index = bandIndexFor(hz);
+  return index < 0 ? null : FREQUENCY_BANDS[index];
 }
 
 function bandIndexFor(hz: number): number {
-  for (let i = 0; i < FREQUENCY_BANDS.length; i += 1) {
+  const top = FREQUENCY_BANDS.length - 1;
+  for (let i = 0; i <= top; i += 1) {
     const band = FREQUENCY_BANDS[i];
-    if (hz >= band.lowHz && hz < band.highHz) return i;
+    if (hz < band.lowHz) continue;
+    // Upper edges are exclusive so the bands tile without overlapping. The
+    // topmost one is the exception: there is no band above ripple to hand
+    // 200 Hz to, and a frequency inside the searched range has to resolve to
+    // something rather than being reported with no band beside it.
+    if (i === top ? hz <= band.highHz : hz < band.highHz) return i;
   }
   return -1;
 }
@@ -507,28 +511,48 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
     share: totalPower > 0 ? accumulated[index] / totalPower : 0,
   }));
 
-  // A silent network has no peak. Searching an all-zero spectrum would return
-  // the first bin and the panel would print a dominant frequency for a circuit
-  // that never fired.
+  // Two things this has to get right, both of which produce a plausible-looking
+  // lie if they are left to the obvious implementation:
+  //
+  //  - A silent network has no peak at all. Searching an all-zero spectrum would
+  //    return the first bin, and the panel would print a dominant frequency for a
+  //    circuit that never fired.
+  //  - `dominantFrequency` refines the peak by fitting a parabola through the
+  //    peak bin and its two neighbours, and the neighbour just outside the search
+  //    can be the larger of the two, in which case the refinement is clamped at
+  //    half a bin and lands beyond the range that was searched. A record whose
+  //    peak bin is the last one under 200 Hz was reported as oscillating at
+  //    201 Hz — outside the advertised search, outside every band, and so shown
+  //    with no band beside it and a band share of zero. The refinement is a
+  //    sub-bin correction to a bin inside the range, so it is held inside it.
+  const raw = totalPower > 0 ? dominantFrequency(power, binHz, SPECTRUM_MIN_HZ, searchMaxHz) : 0;
+  const searched = first <= last;
   const dominantHz =
-    totalPower > 0 ? dominantFrequency(power, binHz, SPECTRUM_MIN_HZ, searchMaxHz) : 0;
+    raw > 0 && searched ? Math.min(Math.max(raw, first * binHz), last * binHz) : 0;
 
-  const peakBin = Math.min(power.length - 1, Math.max(0, Math.round(dominantHz / binHz)));
+  // The peak bin is located by scanning rather than by rounding the refined
+  // frequency, for the same reason: the rounded value can name a neighbour, and
+  // the prominence below only means anything if it is the ratio at the bin the
+  // search actually picked.
+  let peakBin = first;
+  if (searched) {
+    for (let k = first + 1; k <= last; k += 1) if (power[k] > power[peakBin]) peakBin = k;
+  }
   const band = dominantHz > 0 ? bandFor(dominantHz) : null;
   const bandIndex = band === null ? -1 : bandIndexFor(dominantHz);
 
   // Median rather than mean: one strong rhythm would drag a mean upward and
   // hide itself, which is the opposite of what this ratio is for.
-  const searched = power.slice(first, last + 1).sort();
+  const ranked = power.slice(first, last + 1).sort();
   const median =
-    searched.length === 0
+    ranked.length === 0
       ? 0
-      : searched.length % 2 === 1
-        ? searched[(searched.length - 1) >> 1]
-        : (searched[searched.length / 2 - 1] + searched[searched.length / 2]) / 2;
+      : ranked.length % 2 === 1
+        ? ranked[(ranked.length - 1) >> 1]
+        : (ranked[ranked.length / 2 - 1] + ranked[ranked.length / 2]) / 2;
   // Zero padding multiplies the bin count without adding information, so the
   // count of genuinely independent bins is scaled back by the padding factor.
-  const independentBins = (searched.length * m) / nfft;
+  const independentBins = (ranked.length * m) / nfft;
 
   return {
     power,
@@ -537,12 +561,12 @@ export function measureSpectrum(signal: Float32Array, sampleRateHz: number): Spe
     resolutionHz: sampleRateHz / m,
     searchMaxHz,
     dominantHz,
-    dominantPower: power[peakBin],
+    dominantPower: searched ? power[peakBin] : 0,
     band,
     bands,
     totalPower,
     dominantShare: bandIndex >= 0 && totalPower > 0 ? accumulated[bandIndex] / totalPower : 0,
-    prominence: median > 0 ? power[peakBin] / median : 0,
+    prominence: searched && median > 0 ? power[peakBin] / median : 0,
     flatProminence: flatProminenceFor(independentBins),
   };
 }
@@ -1384,7 +1408,11 @@ export interface PerturbationResult {
   times: Float32Array;
   /** RMS membrane-potential difference across the network (mV). */
   distance: Float32Array;
-  /** Share of cells whose spike output differed inside each sample. */
+  /**
+   * Share of the live cells whose spike output differed from the control at
+   * least once inside each sample. A cell that differs on several steps of the
+   * same sample counts once, so this is a share of cells and not of cell-steps.
+   */
   spikeDivergence: Float32Array;
   samples: number;
   /** Fitted exponential growth rate of the distance, per second. */
@@ -1527,11 +1555,16 @@ export async function runPerturbation(
     const distance = new Float32Array(samples);
     const spikeDivergence = new Float32Array(samples);
     const everDiverged = new Uint8Array(count);
+    // Cells already counted in the sample being accumulated, stamped with the
+    // sample index. A stamp rather than a cleared bitmap so closing a sample
+    // costs nothing: sweeping a hundred thousand cells per sample would dominate
+    // the loop it is measuring.
+    const countedInSample = new Int32Array(count).fill(-1);
     let liveCells = 0;
     for (let i = 0; i < count; i += 1) if (live[i] === 1) liveCells += 1;
 
     let sample = 0;
-    let mismatches = 0;
+    let divergedInSample = 0;
     let controlSpikes = 0;
     let perturbedSpikes = 0;
 
@@ -1547,8 +1580,10 @@ export async function runPerturbation(
         controlSpikes += a;
         perturbedSpikes += b;
         if (a === b) continue;
-        mismatches += 1;
         everDiverged[i] = 1;
+        if (countedInSample[i] === sample) continue;
+        countedInSample[i] = sample;
+        divergedInSample += 1;
       }
 
       if ((index + 1) % perSample !== 0 || sample >= samples) return;
@@ -1561,8 +1596,8 @@ export async function runPerturbation(
       }
       times[sample] = (index + 1) * dt;
       distance[sample] = liveCells > 0 ? Math.sqrt(squared / liveCells) : 0;
-      spikeDivergence[sample] = liveCells > 0 ? mismatches / (liveCells * perSample) : 0;
-      mismatches = 0;
+      spikeDivergence[sample] = liveCells > 0 ? divergedInSample / liveCells : 0;
+      divergedInSample = 0;
       sample += 1;
     });
 

@@ -143,6 +143,15 @@
   .nf-docked > * {
     position: static !important;
     inset: auto !important;
+    /*
+     * transform must be reset alongside position. A panel that centres itself
+     * with `left-1/2 -translate-x-1/2` keeps the translate once position is
+     * neutralised, which shifts it half its own width out of the dock column and
+     * into the parent's overflow-hidden — visible as a panel clipped down the
+     * middle rather than as an obviously broken layout.
+     */
+    transform: none !important;
+    margin: 0 !important;
     width: 100% !important;
     max-width: none !important;
     height: 100% !important;

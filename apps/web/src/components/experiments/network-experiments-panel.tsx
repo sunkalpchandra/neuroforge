@@ -530,7 +530,6 @@ export function NetworkExperimentsPanel({
                   {results[entry.key] !== undefined ? (
                     <span
                       aria-hidden
-                      title="Measured"
                       className="mt-[5px] ml-auto size-1.5 shrink-0 rounded-full bg-success/80"
                     />
                   ) : null}
@@ -2002,8 +2001,14 @@ const DIV_PLOT_W = DIV_W - DIV_PAD_L - DIV_PAD_R;
 const DIV_PLOT_H = DIV_H - DIV_PAD_T - DIV_AXIS_H;
 const DIV_DECADES = 6;
 
+/**
+ * The whole plot is derived in one memo, path string included: a trace can run
+ * to thousands of samples and this panel re-renders on every progress tick of
+ * whatever else is running, so rebuilding the path on each render would be
+ * millisecond-scale work for a picture that has not changed.
+ */
 function DivergenceChart({ result, color }: { result: PerturbationResult; color: string }) {
-  const geometry = useMemo(() => {
+  const plot = useMemo(() => {
     let peak = 0;
     for (let i = 0; i < result.samples; i += 1) {
       if (result.distance[i] > peak) peak = result.distance[i];
@@ -2011,10 +2016,19 @@ function DivergenceChart({ result, color }: { result: PerturbationResult; color:
     if (!(peak > 0)) return null;
     const floor = peak / 10 ** DIV_DECADES;
     const spanT = result.times[result.samples - 1] || 1;
-    return { peak, floor, spanT };
+    const x = (ms: number): number => DIV_PAD_L + clamp01(ms / spanT) * DIV_PLOT_W;
+    const y = (value: number): number =>
+      DIV_PAD_T +
+      (1 - clamp01(Math.log10(Math.max(value, floor) / floor) / DIV_DECADES)) * DIV_PLOT_H;
+
+    let path = '';
+    for (let i = 0; i < result.samples; i += 1) {
+      path += `${i === 0 ? 'M' : 'L'}${x(result.times[i]).toFixed(2)} ${y(result.distance[i]).toFixed(2)}`;
+    }
+    return { peak, spanT, x, path };
   }, [result]);
 
-  if (geometry === null) {
+  if (plot === null) {
     return (
       <div className="flex h-[80px] items-center justify-center rounded-control bg-white/[0.02] text-[10px] text-ink-faint">
         The two runs never separated inside this window.
@@ -2022,18 +2036,8 @@ function DivergenceChart({ result, color }: { result: PerturbationResult; color:
     );
   }
 
-  const x = (ms: number): number => DIV_PAD_L + clamp01(ms / geometry.spanT) * DIV_PLOT_W;
-  const y = (value: number): number =>
-    DIV_PAD_T +
-    (1 - clamp01(Math.log10(Math.max(value, geometry.floor) / geometry.floor) / DIV_DECADES)) *
-      DIV_PLOT_H;
+  const { x, path } = plot;
   const baseline = DIV_PAD_T + DIV_PLOT_H;
-
-  let path = '';
-  for (let i = 0; i < result.samples; i += 1) {
-    path += `${i === 0 ? 'M' : 'L'}${x(result.times[i]).toFixed(2)} ${y(result.distance[i]).toFixed(2)}`;
-  }
-
   const fitted = result.lambdaPerSecond !== null && result.fitToMs > result.fitFromMs;
 
   return (
@@ -2074,7 +2078,7 @@ function DivergenceChart({ result, color }: { result: PerturbationResult; color:
       <path d={path} fill="none" stroke={color} strokeWidth={1.25} strokeLinejoin="round" />
 
       <text x={2} y={DIV_PAD_T + 6} fontSize={8} fill="var(--color-ink-faint)">
-        {fixed(geometry.peak, geometry.peak < 10 ? 1 : 0)}
+        {fixed(plot.peak, plot.peak < 10 ? 1 : 0)}
       </text>
       <text x={2} y={baseline} fontSize={8} fill="var(--color-ink-faint)">
         mV
@@ -2099,7 +2103,7 @@ function DivergenceChart({ result, color }: { result: PerturbationResult; color:
         fontSize={8}
         fill="var(--color-ink-faint)"
       >
-        {fixed(geometry.spanT, 0)} ms
+        {fixed(plot.spanT, 0)} ms
       </text>
     </svg>
   );
@@ -2319,8 +2323,14 @@ function WarningList({ warnings }: { warnings: readonly string[] }) {
   return (
     <PanelSection label="Read this before believing it">
       <ul className="flex flex-col gap-1.5">
-        {warnings.map((warning) => (
-          <li key={warning} className="flex items-start gap-1.5 text-[10px] leading-snug text-warning/90">
+        {/* Keyed by position as well as text: two protocols in one report can
+            raise the same sentence about different runs, and a duplicate key
+            would drop one of them. */}
+        {warnings.map((warning, index) => (
+          <li
+            key={`${index}-${warning}`}
+            className="flex items-start gap-1.5 text-[10px] leading-snug text-warning/90"
+          >
             <TriangleAlert size={10} aria-hidden className="mt-[2px] shrink-0" />
             <span>{warning}</span>
           </li>

@@ -490,6 +490,8 @@ interface CellRig {
   slot: number;
   /** The cell's document bias, which command currents are added to. */
   holdingPa: number;
+  /** The timestep the engine actually integrates at, after clamping. */
+  dt: number;
 }
 
 function openCell(circuit: Circuit, neuron: Neuron, dt: number): CellRig {
@@ -498,17 +500,28 @@ function openCell(circuit: Circuit, neuron: Neuron, dt: number): CellRig {
     engine.load(preparation(circuit, [neuron], [], dt));
     const slot = engine.slotOf(neuron.id);
     if (slot < 0) throw new ProtocolError('The cell could not be loaded into an engine.');
-    return { engine, slot, holdingPa: engine.buffers.neurons.bias[slot] };
+    return {
+      engine,
+      slot,
+      holdingPa: engine.buffers.neurons.bias[slot],
+      dt: engine.settings.dt,
+    };
   } catch (cause) {
     engine.dispose();
     throw cause;
   }
 }
 
+/**
+ * Provenance for a finished run.
+ *
+ * The timestep reported is the one the engine was actually stepped at, which is
+ * the requested value clamped into [MIN_DT, MAX_DT]. Reporting the request would
+ * put a number in the CSV header that no part of the measurement ever used.
+ */
 function metaFor(
   neuron: Neuron,
   rig: CellRig,
-  dt: number,
   startedAt: number,
   simulatedMs: number,
 ): ProtocolMeta {
@@ -518,7 +531,7 @@ function metaFor(
     seed: neuron.morphology.seed,
     model: neuron.params.kind,
     holdingPa: rig.holdingPa,
-    dt,
+    dt: rig.dt,
     elapsedMs: performance.now() - startedAt,
     simulatedMs,
   };
@@ -645,7 +658,7 @@ export async function runFiCurve(
     firing.map((point) => point.rateHz),
   );
   const maxRateHz = points.reduce((max, point) => Math.max(max, point.rateHz), 0);
-  const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
+  const meta = metaFor(neuron, rig, startedAt, simulatedMs);
 
   const csv = [
     ...csvHeader(meta, 'F-I curve', [
@@ -737,7 +750,7 @@ export async function runIvCurve(
     passive.map((point) => point.currentPa),
     passive.map((point) => point.steadyMv),
   );
-  const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
+  const meta = metaFor(neuron, rig, startedAt, simulatedMs);
   const excluded = points.length - passive.length;
   // dV/dI in mV/pA is a resistance in gigaohms; the readout is in megaohms.
   const inputResistanceMohm = fit === null ? null : fit.slope * 1000;
@@ -1030,7 +1043,7 @@ export async function runMembraneTau(
     }
   }
 
-  const dt = clamp(params.dt, MIN_DT, MAX_DT);
+  const dt = rig.dt;
   const peakEnd = Math.min(
     traceV.length,
     Math.max(onsetIndex + MIN_FIT_SAMPLES, peakIndex + 1),
@@ -1058,7 +1071,7 @@ export async function runMembraneTau(
 
   const tauMs = fit.tauMs;
   const analytic = analyticTau(neuron.params);
-  const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
+  const meta = metaFor(neuron, rig, startedAt, simulatedMs);
 
   const csv = [
     ...csvHeader(meta, 'Membrane time constant', [
@@ -1149,7 +1162,7 @@ export async function runAdaptation(
   for (let i = tailFrom; i < isisMs.length; i += 1) tailSum += isisMs[i];
   const tailMean = isisMs.length > 0 ? tailSum / (isisMs.length - tailFrom) : 0;
 
-  const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
+  const meta = metaFor(neuron, rig, startedAt, simulatedMs);
   const adaptationIndex = first !== null && last !== null && first > 0 ? last / first : null;
 
   const csv = [
@@ -1195,6 +1208,8 @@ interface PairRig {
   preSlot: number;
   /** Index of the synapse under study inside the loaded pair. */
   synIndex: number;
+  /** The timestep the engine actually integrates at, after clamping. */
+  dt: number;
 }
 
 function openPair(circuit: Circuit, synapse: Synapse, dt: number): PairRig {
@@ -1211,7 +1226,7 @@ function openPair(circuit: Circuit, synapse: Synapse, dt: number): PairRig {
     if (preSlot < 0 || engine.buffers.synapses.count !== 1) {
       throw new ProtocolError('The synapse could not be loaded into an isolated pair.');
     }
-    return { engine, preSlot, synIndex: 0 };
+    return { engine, preSlot, synIndex: 0, dt: engine.settings.dt };
   } catch (cause) {
     engine.dispose();
     throw cause;
@@ -1435,12 +1450,29 @@ export async function runPairedPulse(
 
       let peak1 = 0;
       let peak2 = 0;
+      // Nothing the second stimulus causes can reach the synapse before its
+      // conduction delay has elapsed, so the difference trace is identically
+      // zero until then. Skipping that stretch keeps the maximum from latching
+      // onto the shot noise left over from the first response when release is
+      // stochastic and only a few trials are averaged.
+      const secondFrom = schedule.pulse2Step + stepsFor(synapse.delay, dt);
       for (let s = 0; s < schedule.totalSteps; s += 1) {
         const first = controlSum[s] / evoked;
         if (first > peak1) peak1 = first;
-        if (s < schedule.pulse2Step) continue;
+        if (s < secondFrom) continue;
         const second = pairedSum[s] / evoked - first;
         if (second > peak2) peak2 = second;
+      }
+
+      // A ratio needs a first response to divide by, and evoked spikes do not
+      // guarantee one: below a release probability of 1 every trial can fail to
+      // release, leaving a point with no ratio. Saying so is the whole job — a
+      // silent gap in the plot is worse than a stated failure.
+      let note: string | null = evoked < trials ? failure : null;
+      if (!(peak1 > 0)) {
+        note = `both stimuli evoked spikes but no vesicle was released in ${
+          evoked === 1 ? 'the trial' : `any of the ${evoked} trials`
+        }; raise the trial count or the release probability`;
       }
 
       points.push({
@@ -1449,7 +1481,7 @@ export async function runPairedPulse(
         peak2Ns: peak2,
         ratio: peak1 > 0 ? peak2 / peak1 : null,
         evoked,
-        failure: evoked < trials ? failure : null,
+        failure: note,
       });
     }
   } finally {
@@ -1462,7 +1494,7 @@ export async function runPairedPulse(
     seed: source.morphology.seed,
     model: source.params.kind,
     holdingPa,
-    dt: params.dt,
+    dt: rig.dt,
     elapsedMs: performance.now() - startedAt,
     simulatedMs,
   };
@@ -1633,7 +1665,7 @@ export async function runRheobase(
     rig.engine.dispose();
   }
 
-  const meta = metaFor(neuron, rig, params.dt, startedAt, simulatedMs);
+  const meta = metaFor(neuron, rig, startedAt, simulatedMs);
   const csv = [
     ...csvHeader(meta, 'Rheobase search', [
       `window: ${csvNumber(params.windowMs)} ms, tolerance: ${csvNumber(tolerance)} pA`,

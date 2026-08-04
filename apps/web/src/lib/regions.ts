@@ -718,6 +718,8 @@ export function regionStats(regions: RegionSet, buffers: SimulationBuffers): Reg
   const sumY = new Float64Array(size);
   const sumZ = new Float64Array(size);
   const rateSum = new Float64Array(size);
+  /** Members whose rate was readable, which is the divisor `meanRateByRegion` uses. */
+  const rated = new Uint32Array(size);
   const placed = new Uint32Array(size);
   const boxMin = new Float64Array(size * 3).fill(Infinity);
   const boxMax = new Float64Array(size * 3).fill(-Infinity);
@@ -728,7 +730,10 @@ export function regionStats(regions: RegionSet, buffers: SimulationBuffers): Reg
     cells[r] += 1;
     if (neurons.polarity[i] === 1) inhibitory[r] += 1;
     const rate = neurons.rate[i];
-    if (Number.isFinite(rate)) rateSum[r] += rate;
+    if (Number.isFinite(rate)) {
+      rateSum[r] += rate;
+      rated[r] += 1;
+    }
 
     const p = i * 3;
     const x = position[p];
@@ -759,7 +764,10 @@ export function regionStats(regions: RegionSet, buffers: SimulationBuffers): Reg
       extent[b + 1] = boxMax[b + 1] - boxMin[b + 1];
       extent[b + 2] = boxMax[b + 2] - boxMin[b + 2];
     }
-    meanRate[r] = cells[r] > 0 ? rateSum[r] / cells[r] : 0;
+    // Averaged over the cells that had a readable rate, not over every member:
+    // `meanRateByRegion` resamples this same column live, and dividing the two
+    // by different denominators would make the value jump on every re-cut.
+    meanRate[r] = rated[r] > 0 ? rateSum[r] / rated[r] : 0;
   }
 
   const spread = new Float64Array(size);

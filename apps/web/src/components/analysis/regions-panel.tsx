@@ -249,7 +249,18 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
   // rather than sitting there as an unexplained black square.
   const [unavailable, setUnavailable] = useState(false);
 
-  const hostRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * The measured element is held as state rather than in a ref because it does
+   * not exist yet on the commit that first runs the sizing effect below.
+   *
+   * Until the first cut lands this component renders the loading panel, which
+   * has no canvas host. A ref object would therefore still be null when that
+   * effect ran, and because `open` — its only other input — never changes
+   * afterwards, the effect would never run again: the ResizeObserver would never
+   * attach, the surface would stay at zero and the matrix would never paint. A
+   * callback ref re-runs the effect on the commit that attaches the node.
+   */
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const busyRef = useRef(false);
@@ -288,14 +299,16 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
           wanted.kind === 'grid'
             ? gridRegions(buffers, wanted.divisions)
             : populationRegions(useEditor.getState().circuit, buffers);
+        const matrix = regionMatrix(regions, buffers);
+        const stats = regionStats(regions, buffers);
+        const swatches = regionSwatches(regions, buffers);
         const next: RegionView = {
           regions,
-          matrix: regionMatrix(regions, buffers),
-          stats: regionStats(regions, buffers),
-          swatches: regionSwatches(regions, buffers),
-          buildMs: 0,
+          matrix,
+          stats,
+          swatches,
+          buildMs: performance.now() - started,
         };
-        next.buildMs = performance.now() - started;
         costRef.current = next.buildMs;
         hasDataRef.current = true;
         setView(next);
@@ -389,7 +402,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
     [view],
   );
 
-  const order_ = useMemo(() => {
+  const ranked = useMemo(() => {
     if (view === null || size === 0) return EMPTY_ORDER;
     const stats = view.stats;
     const indices = Array.from({ length: size }, (_, i) => i);
@@ -413,9 +426,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
   /* --------------------------------------------------------------- surface -- */
 
   useEffect(() => {
-    if (!open) return;
-    const host = hostRef.current;
-    if (host === null) return;
+    if (!open || host === null) return;
 
     const measure = () => {
       setSurface((current) => {
@@ -439,7 +450,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
       observer.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [open]);
+  }, [open, host]);
 
   /* ----------------------------------------------------------------- paint -- */
 
@@ -739,7 +750,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
         ? `${formatValue(field.minPositive, field.unit)} → ${formatValue(field.max, field.unit)}`
         : `0 → ${formatValue(field.max, field.unit)}`;
 
-  const listed = order_.slice(0, MAX_LIST_ROWS);
+  const listed = ranked.slice(0, MAX_LIST_ROWS);
 
   return (
     <Panel className={cn('pointer-events-auto flex flex-col', placement)}>
@@ -774,7 +785,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
             <div className="mt-0.5 flex flex-col">
               <ExtremeRow
                 caption="most local"
-                tone="text-success"
+                tone={MOST_LOCAL_TONE}
                 index={extremes.most}
                 regions={regions}
                 stats={stats}
@@ -783,7 +794,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
               />
               <ExtremeRow
                 caption="least local"
-                tone="text-warning"
+                tone={LEAST_LOCAL_TONE}
                 index={extremes.least}
                 regions={regions}
                 stats={stats}
@@ -812,7 +823,7 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
           }
         >
           <div
-            ref={hostRef}
+            ref={setHost}
             tabIndex={0}
             aria-label={`Region by region connection matrix, ${size} by ${size}, ${grouped(
               matrix.synapses,
@@ -921,11 +932,14 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
             <p className="text-[10.5px] text-ink-faint">Nothing to divide.</p>
           ) : (
             <>
-              <div className="flex items-baseline gap-2 px-1.5 text-[9px] tracking-[0.06em] text-ink-faint uppercase">
+              {/* Column widths mirror RegionRow exactly, including the leading
+                  swatch, so the headings sit over the values they name. */}
+              <div className="flex items-baseline gap-1.5 px-1.5 text-[9px] tracking-[0.06em] text-ink-faint uppercase">
+                <span aria-hidden className="w-3.5 shrink-0" />
                 <span className="min-w-0 flex-1">region</span>
-                <span className="nf-numeric w-10 shrink-0 text-right">cells</span>
-                <span className="nf-numeric w-11 shrink-0 text-right">rate</span>
-                <span className="nf-numeric w-9 shrink-0 text-right">local</span>
+                <span className="w-10 shrink-0 text-right">cells</span>
+                <span className="w-11 shrink-0 text-right">rate</span>
+                <span className="w-9 shrink-0 text-right">local</span>
               </div>
               <ul className="flex flex-col">
                 {listed.map((index) => (
@@ -934,22 +948,20 @@ export function RegionsPanel({ open = true, onClose, className }: RegionsPanelPr
                       region={regions.regions[index]}
                       colors={swatches[index]}
                       cells={stats.cells[index]}
+                      // The live sample when it is in step with the partition,
+                      // and the snapshot taken by the pass until it is — which
+                      // is what stops a re-cut from blanking the column.
                       rate={rates.length === size ? rates[index] : stats.meanRate[index]}
                       locality={stats.locality[index]}
-                      internal={stats.internal[index]}
-                      outgoing={stats.outgoing[index]}
-                      incoming={stats.incoming[index]}
-                      meanIn={stats.meanInDegree[index]}
-                      meanOut={stats.meanOutDegree[index]}
-                      radius={stats.radius[index]}
+                      hint={describeRegion(stats, index)}
                       onSelect={selectRegion}
                     />
                   </li>
                 ))}
               </ul>
-              {order_.length > listed.length ? (
+              {ranked.length > listed.length ? (
                 <p className="px-1.5 pt-1 text-[9.5px] text-ink-faint">
-                  {grouped(order_.length - listed.length)} more regions past the list cap.
+                  {grouped(ranked.length - listed.length)} more regions past the list cap.
                 </p>
               ) : null}
               {regions.unassigned > 0 ? (
@@ -1123,7 +1135,15 @@ function paintMatrix(
 
   // Cells first, then the rules on top: at fractional cell sizes a fill and a
   // stroke on the same edge fight, and the fill has to lose.
+  //
+  // Each fill overruns its cell slightly so neighbours never leave a seam of
+  // background showing through at fractional sizes; the clip is what stops the
+  // last row and column from overrunning the plot itself.
   const overlap = cell < 1.5 ? 0.5 : 1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(origin, origin, plot, plot);
+  ctx.clip();
   for (let row = 0; row < size; row += 1) {
     const base = row * size;
     const y = origin + row * cell;
@@ -1134,6 +1154,7 @@ function paintMatrix(
       ctx.fillRect(origin + col * cell, y, cell + overlap, cell + overlap);
     }
   }
+  ctx.restore();
 
   if (cell >= MIN_GRID_CELL) {
     ctx.strokeStyle = GRID_CSS;
@@ -1161,10 +1182,11 @@ function paintMatrix(
   // Identity strips along both axes. Every segment is a real cell's colour, so
   // a row here and a cluster of glyphs in the viewport are the same object.
   for (let i = 0; i < size; i += 1) {
-    const colors = swatches[i] ?? [];
+    const colors = swatches[i];
     const at = origin + i * cell;
-    paintStrip(ctx, PAD, at, TICK, cell + overlap, colors, true);
-    paintStrip(ctx, at, PAD, cell + overlap, TICK, colors, false);
+    const span = Math.min(cell + overlap, origin + plot - at);
+    paintStrip(ctx, PAD, at, TICK, span, colors, true);
+    paintStrip(ctx, at, PAD, span, TICK, colors, false);
   }
 
   ctx.strokeStyle = GRID_CSS;
@@ -1239,9 +1261,44 @@ function Strip({ colors }: { colors: readonly string[] | undefined }) {
   );
 }
 
+/** Text and rule colours for the two ends of the locality ranking. */
+interface Tone {
+  text: string;
+  rule: string;
+}
+
+const MOST_LOCAL_TONE: Tone = { text: 'text-success', rule: 'bg-success' };
+const LEAST_LOCAL_TONE: Tone = { text: 'text-warning', rule: 'bg-warning' };
+
+/**
+ * Everything the stats pass measured about one region, as one tooltip line.
+ *
+ * Built here rather than in the row so the row stays a renderer: the numbers
+ * are all columns of the same table and formatting them together keeps their
+ * units and precision consistent.
+ */
+function describeRegion(stats: RegionStats, index: number): string {
+  const b = index * 3;
+  const wiring =
+    `${grouped(stats.internal[index])} synapses stay inside, ` +
+    `${grouped(stats.outgoing[index])} leave, ${grouped(stats.incoming[index])} arrive`;
+  const degree =
+    `mean in/out degree ${fixed(stats.meanInDegree[index], 1)}/` +
+    `${fixed(stats.meanOutDegree[index], 1)}`;
+  const shape =
+    `${fixed(stats.extent[b], 0)}×${fixed(stats.extent[b + 1], 0)}×${fixed(stats.extent[b + 2], 0)} ` +
+    `units about (${fixed(stats.centroid[b], 0)}, ${fixed(stats.centroid[b + 1], 0)}, ` +
+    `${fixed(stats.centroid[b + 2], 0)}), spread ${fixed(stats.radius[index], 1)}`;
+  const balance =
+    stats.cells[index] > 0
+      ? `${percent(stats.inhibitory[index] / stats.cells[index], 0)} inhibitory`
+      : 'no cells';
+  return `${wiring} · ${degree} · ${balance} · ${shape}`;
+}
+
 interface ExtremeRowProps {
   caption: string;
-  tone: string;
+  tone: Tone;
   index: number;
   regions: RegionSet;
   stats: RegionStats;
@@ -1249,19 +1306,11 @@ interface ExtremeRowProps {
   onSelect: (index: number) => void;
 }
 
-function ExtremeRow({
-  caption,
-  tone,
-  index,
-  regions,
-  stats,
-  swatches,
-  onSelect,
-}: ExtremeRowProps) {
+function ExtremeRow({ caption, tone, index, regions, stats, swatches, onSelect }: ExtremeRowProps) {
   if (index < 0) {
     return (
       <div className="flex items-center gap-1.5 px-1.5 py-1 text-[10.5px] text-ink-faint">
-        <span className={cn('w-[62px] shrink-0 text-[9px] tracking-[0.06em] uppercase', tone)}>
+        <span className={cn('w-[62px] shrink-0 text-[9px] tracking-[0.06em] uppercase', tone.text)}>
           {caption}
         </span>
         <span>no region qualifies</span>
@@ -1272,29 +1321,33 @@ function ExtremeRow({
   const region = regions.regions[index];
   const locality = stats.locality[index];
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(index)}
-      className={cn(
-        'relative flex w-full items-center gap-1.5 overflow-hidden rounded-control px-1.5 py-1 text-left text-[10.5px] transition-colors',
-        'hover:bg-panel-raised focus-visible:bg-panel-raised',
-      )}
-    >
-      <span className={cn('w-[62px] shrink-0 text-[9px] tracking-[0.06em] uppercase', tone)}>
-        {caption}
-      </span>
-      <Strip colors={swatches[index]} />
-      <span className="min-w-0 flex-1 truncate text-ink">{region.label}</span>
-      <span className="nf-numeric shrink-0 text-ink-faint">{compact(stats.cells[index])}</span>
-      <span className={cn('nf-numeric w-9 shrink-0 text-right', tone)}>
-        {percent(locality, 0)}
-      </span>
-      <span
-        aria-hidden
-        className="absolute bottom-0 left-0 h-px bg-current opacity-50"
-        style={{ width: `${Math.max(0, Math.min(1, locality)) * 100}%` }}
-      />
-    </button>
+    <Tooltip content={describeRegion(stats, index)} side="top">
+      <button
+        type="button"
+        onClick={() => onSelect(index)}
+        className={cn(
+          'relative flex w-full items-center gap-1.5 overflow-hidden rounded-control px-1.5 py-1 text-left text-[10.5px] transition-colors',
+          'hover:bg-panel-raised focus-visible:bg-panel-raised',
+        )}
+      >
+        <span
+          className={cn('w-[62px] shrink-0 text-[9px] tracking-[0.06em] uppercase', tone.text)}
+        >
+          {caption}
+        </span>
+        <Strip colors={swatches[index]} />
+        <span className="min-w-0 flex-1 truncate text-ink">{region.label}</span>
+        <span className="nf-numeric shrink-0 text-ink-faint">{compact(stats.cells[index])}</span>
+        <span className={cn('nf-numeric w-9 shrink-0 text-right', tone.text)}>
+          {percent(locality, 0)}
+        </span>
+        <span
+          aria-hidden
+          className={cn('absolute bottom-0 left-0 h-px opacity-60', tone.rule)}
+          style={{ width: `${Math.max(0, Math.min(1, locality)) * 100}%` }}
+        />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -1304,34 +1357,11 @@ interface RegionRowProps {
   cells: number;
   rate: number;
   locality: number;
-  internal: number;
-  outgoing: number;
-  incoming: number;
-  meanIn: number;
-  meanOut: number;
-  radius: number;
+  hint: string;
   onSelect: (index: number) => void;
 }
 
-function RegionRow({
-  region,
-  colors,
-  cells,
-  rate,
-  locality,
-  internal,
-  outgoing,
-  incoming,
-  meanIn,
-  meanOut,
-  radius,
-  onSelect,
-}: RegionRowProps) {
-  const hint =
-    `${grouped(internal)} synapses stay inside, ${grouped(outgoing)} leave, ${grouped(incoming)} arrive · ` +
-    `mean in/out degree ${fixed(meanIn, 1)}/${fixed(meanOut, 1)} · ` +
-    `spread ${fixed(radius, 1)} units about its centroid`;
-
+function RegionRow({ region, colors, cells, rate, locality, hint, onSelect }: RegionRowProps) {
   return (
     <Tooltip content={hint} side="top">
       <button

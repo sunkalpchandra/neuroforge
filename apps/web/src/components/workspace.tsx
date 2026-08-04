@@ -4,9 +4,13 @@ import { useCallback, useEffect, useRef } from 'react';
 import { ToastViewport, pushToast } from '@neuroforge/ui';
 import {
   Activity,
+  Boxes,
   ChartNetwork,
   Grid3x3,
   Route,
+  SquareTerminal,
+  ChartColumn,
+  Spline,
   Waves,
   Zap,
   Search as SearchIcon,
@@ -24,7 +28,11 @@ import { CommandPalette } from './command-palette';
 import { NetworkAnalysis } from './analysis/network-analysis';
 import { PathwaysPanel } from './analysis/pathways-panel';
 import { ConnectivityMatrix } from './analysis/connectivity-matrix';
+import { RegionsPanel } from './analysis/regions-panel';
 import { CellTypesPanel } from './analysis/cell-types-panel';
+import { NetworkGraph } from './analysis/network-graph';
+import { StatsPanel } from './analysis/stats-panel';
+import { QueryPanel } from './search/query-panel';
 import { EphysPanel } from './experiments/ephys-panel';
 import { NetworkExperimentsPanel } from './experiments/network-experiments-panel';
 import { SearchPanel } from './search/search-panel';
@@ -53,7 +61,9 @@ import { readSceneFromLocation, writeSceneToLocation } from '@/lib/scene-url';
 const LEFT_DOCK: readonly DockEntry[] = [
   { tab: 'builder', title: 'AI builder', icon: <Sparkles />, render: () => <AiBuilder /> },
   { tab: 'search', title: 'Search cells', icon: <SearchIcon />, render: () => <SearchPanel /> },
+  { tab: 'query', title: 'Query', icon: <SquareTerminal />, render: () => <QueryPanel /> },
   { tab: 'cell-types', title: 'Cell types & clusters', icon: <Shapes />, render: () => <CellTypesPanel /> },
+  { tab: 'regions', title: 'Regions', icon: <Boxes />, render: () => <RegionsPanel /> },
 ];
 
 const RIGHT_DOCK: readonly DockEntry[] = [
@@ -61,6 +71,8 @@ const RIGHT_DOCK: readonly DockEntry[] = [
   { tab: 'analysis', title: 'Network analysis', icon: <ChartNetwork />, render: () => <NetworkAnalysis /> },
   { tab: 'pathways', title: 'Pathways', icon: <Route />, render: () => <PathwaysPanel /> },
   { tab: 'connectivity', title: 'Connectivity matrix', icon: <Grid3x3 />, render: () => <ConnectivityMatrix /> },
+  { tab: 'graph', title: 'Network graph', icon: <Spline />, render: () => <NetworkGraph /> },
+  { tab: 'stats', title: 'Statistics', icon: <ChartColumn />, render: () => <StatsPanel /> },
   { tab: 'ephys', title: 'Patch clamp', icon: <Zap />, render: () => <EphysPanel /> },
   { tab: 'network-experiments', title: 'Network experiments', icon: <Waves />, render: () => <NetworkExperimentsPanel /> },
   { tab: 'library', title: 'Export & snapshots', icon: <Share2 />, render: () => <LibraryPanel /> },
