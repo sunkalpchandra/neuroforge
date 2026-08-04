@@ -20,7 +20,7 @@ import { linearColor } from './palette';
 
 const MINOR_OPACITY = 0.3;
 const MAJOR_OPACITY = 0.62;
-const AXIS_OPACITY = 0.9;
+const AXIS_OPACITY = 0.5;
 
 /** Cell size is chosen to sit this many world units per pixel-ish decade. */
 const CELL_ANCHOR = 0.03;
@@ -46,10 +46,10 @@ export class InfiniteGrid extends THREE.Mesh {
       uniforms: {
         uInverseProjectionMatrix: { value: new THREE.Matrix4() },
         uInverseViewMatrix: { value: new THREE.Matrix4() },
-        uGridColor: { value: linearColor('#2A3644') },
-        uMajorColor: { value: linearColor('#43586E') },
-        uAxisXColor: { value: linearColor(COLORS.danger) },
-        uAxisZColor: { value: linearColor(COLORS.accent) },
+        uGridColor: { value: linearColor('#141A21') },
+        uMajorColor: { value: linearColor('#202A35') },
+        uAxisXColor: { value: linearColor('#3A2630') },
+        uAxisZColor: { value: linearColor('#20323C') },
         uFogColor: { value: linearColor(COLORS.background) },
         uHeight: { value: 0 },
         uCellSize: { value: 1 },

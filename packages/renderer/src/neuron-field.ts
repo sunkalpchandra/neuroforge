@@ -203,20 +203,23 @@ type PartStyle = {
   opacity: number;
 };
 
-/**
- * Surfaces are matte and opaque, the way a segmentation mesh reads.
+/*
+ * Surfaces are matte and opaque, the way a segmentation mesh reads: a strong rim
+ * and a translucent membrane make a cell look like glass, and glass takes its
+ * colour from whatever is behind it — which in a dense field is other cells.
  *
- * A strong rim and a translucent membrane make a cell look like glass, and glass
- * takes its colour from what is behind it — which in a dense field is other
- * cells. The identity hue then stops being reliable exactly where the view is
- * busiest and identity matters most. Emissive is untouched because it multiplies
- * the spike envelope only, so a firing cell still flares against matte
- * neighbours.
+ * Emissive is small because the identity palette leaves no headroom above it.
+ * Neuroglancer's colour model pins value to 1, so a cell is already at full
+ * channel intensity before anything is added — the old strengths were tuned
+ * against a dimmer palette and now drive every firing cell straight to white,
+ * where the bloom pass smears the whole network into one glowing mass. These
+ * values keep a spike clearly brighter than rest while staying inside the range
+ * the tone map can still resolve as colour.
  */
 const PART_STYLE: readonly PartStyle[] = [
-  { swell: 0.26, rim: 0.5, emissive: 3.4, roughness: 0.62, translucency: 0.22, opacity: 1 },
-  { swell: 0.1, rim: 0.36, emissive: 1.9, roughness: 0.72, translucency: 0.16, opacity: 1 },
-  { swell: 0.08, rim: 0.3, emissive: 1.5, roughness: 0.78, translucency: 0.12, opacity: 1 },
+  { swell: 0.26, rim: 0.5, emissive: 0.85, roughness: 0.62, translucency: 0.22, opacity: 1 },
+  { swell: 0.1, rim: 0.36, emissive: 0.5, roughness: 0.72, translucency: 0.16, opacity: 1 },
+  { swell: 0.08, rim: 0.3, emissive: 0.4, roughness: 0.78, translucency: 0.12, opacity: 1 },
 ];
 
 function createMaterial(part: number): THREE.ShaderMaterial {

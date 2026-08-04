@@ -25,3 +25,5 @@ export type { IntegratorCode, HhState } from './models';
 
 export { createCursor, drain, schedule, clearQueue, maxDelay } from './delay-queue';
 export type { DelayCursor } from './delay-queue';
+export { probeBackend } from './validate-backend';
+export type { BackendProbe } from './validate-backend';

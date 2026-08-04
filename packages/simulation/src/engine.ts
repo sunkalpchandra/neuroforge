@@ -34,6 +34,8 @@ import type { Integrator, StepResult } from './types';
  * else holds a duplicate, which is what keeps a hundred thousand neurons
  * affordable.
  */
+const STEP_BUDGET_MS = 6;
+
 export class SimulationEngine {
   private _buffers: SimulationBuffers;
   private _settings: SimulationSettings;
@@ -52,6 +54,9 @@ export class SimulationEngine {
 
   /** Unconsumed simulated milliseconds carried between frames. */
   private accumulator = 0;
+
+  /** Smoothed cost of one integration substep, in wall-clock milliseconds. */
+  private msPerStep = 0;
 
   /**
    * Device offered to GPU backends. `undefined` means none has been offered and
@@ -244,6 +249,7 @@ export class SimulationEngine {
   reset(): void {
     this.integrator.reset(this._buffers);
     this.accumulator = 0;
+    this.msPerStep = 0;
     this.clearPokes();
     this.rng = new Rng(this._settings.seed);
     this._stats = { ...this._stats, simTime: 0, spikes: 0, meanRate: 0 };
@@ -274,17 +280,38 @@ export class SimulationEngine {
     const { dt, speed, maxSubstepsPerFrame } = this._settings;
     this.accumulator += dtSeconds * 1000 * speed;
 
-    let steps = Math.floor(this.accumulator / dt);
-    if (steps <= 0) return EMPTY_STEP_RESULT;
+    const wanted = Math.floor(this.accumulator / dt);
+    if (wanted <= 0) return EMPTY_STEP_RESULT;
 
-    if (steps > maxSubstepsPerFrame) {
-      steps = maxSubstepsPerFrame;
+    // How many substeps this frame can pay for, from what the last one actually
+    // cost. A fixed ceiling cannot do this job: set low enough to protect a
+    // hundred-thousand-cell network and it pins a seventy-cell one to a fraction
+    // of real time on hardware that could run it hundreds of times over — which
+    // is what a flat cap of 32 was doing, holding every circuit at 0.19x.
+    let affordable = maxSubstepsPerFrame;
+    if (this.msPerStep > 0) {
+      affordable = Math.max(1, Math.floor(STEP_BUDGET_MS / this.msPerStep));
+    }
+
+    let steps = Math.min(wanted, affordable, maxSubstepsPerFrame);
+    if (steps <= 0) steps = 1;
+
+    if (steps < wanted) {
+      // Surplus is dropped rather than carried: a network that cannot keep up
+      // should run slower than real time, not accumulate a debt that makes every
+      // subsequent frame longer than the last.
       this.accumulator = 0;
     } else {
       this.accumulator -= steps * dt;
     }
 
-    return this.runSteps(steps, dtSeconds);
+    const result = this.runSteps(steps, dtSeconds);
+    if (result.steps > 0 && result.simMs > 0) {
+      const sample = result.simMs / result.steps;
+      // Smoothed, so one slow frame does not collapse the next frame's budget.
+      this.msPerStep = this.msPerStep === 0 ? sample : ema(this.msPerStep, sample, 0.25);
+    }
+    return result;
   }
 
   /** One deterministic substep, independent of the clock. */

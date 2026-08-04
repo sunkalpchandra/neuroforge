@@ -4,6 +4,7 @@ import { requestComputeDevice } from './capabilities';
 import { CpuIntegrator } from './integrator-cpu';
 import { GpuIntegrator, replaySpikeLog } from './integrator-gpu';
 import { INTEGRATOR_CODE } from './models';
+import { probeBackend } from './validate-backend';
 import type { Integrator, StepResult } from './types';
 
 /**
@@ -631,6 +632,23 @@ function fallbackChain(preference: BackendPreference): readonly BackendPreferenc
  * of a second device if the app also has one, so callers that have a device
  * should pass it.
  */
+/**
+ * Probe a candidate and report the verdict.
+ *
+ * A rejection is warned about rather than swallowed: a user running on the
+ * fallback deserves to know their accelerated path was rejected and why, and a
+ * silent downgrade is exactly the failure this whole mechanism exists to catch.
+ */
+function accept(candidate: Integrator, label: string): boolean {
+  const probe = probeBackend(candidate);
+  if (!probe.ok) {
+    console.warn(
+      `[neuroforge] ${label} backend rejected: ${probe.reason}. Falling back.`,
+    );
+  }
+  return probe.ok;
+}
+
 export async function createIntegrator(
   preference: BackendPreference,
   device?: GPUDevice | null,
@@ -641,14 +659,20 @@ export async function createIntegrator(
       const target = device ?? (await requestComputeDevice());
       if (target === null) continue;
       const gpu = await GpuIntegrator.create(target);
-      if (gpu !== null) return gpu;
+      if (gpu !== null) {
+        if (accept(gpu, 'gpu')) return gpu;
+        gpu.dispose();
+      }
       continue;
     }
 
     if (candidate === 'wasm') {
       if (!WasmIntegrator.isAvailable()) continue;
       const wasm = await WasmIntegrator.create();
-      if (wasm !== null) return wasm;
+      if (wasm !== null) {
+        if (accept(wasm, 'wasm')) return wasm;
+        wasm.dispose();
+      }
       continue;
     }
 

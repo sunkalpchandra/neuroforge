@@ -61,7 +61,7 @@ void main() {
   // Perspective attenuation, with a floor so a distant contact stays visible as
   // a point rather than vanishing — the count of contacts is the signal.
   float dist = max(-viewPosition.z, 0.001);
-  gl_PointSize = max(1.5, uPixelScale * uSizeScale * markerSize / dist);
+  gl_PointSize = clamp(uPixelScale * uSizeScale * markerSize / dist, 1.0, 14.0);
 }
 `;
 
@@ -79,8 +79,9 @@ void main() {
   if (r2 > 1.0) discard;
   float edge = smoothstep(1.0, 0.35, r2);
   float core = smoothstep(0.6, 0.0, r2);
-  vec3 color = vColor * (0.55 + 0.45 * core) + vColor * vActivity * 1.6;
-  gl_FragColor = vec4(color, edge);
+  vec3 color = vColor * (0.35 + 0.3 * core) + vColor * vActivity * 2.2;
+  // Resting contacts sit well back; a transmitting one rises out of the field.
+  gl_FragColor = vec4(color, edge * (0.38 + 0.62 * vActivity));
 }
 `;
 
@@ -186,7 +187,7 @@ export class SynapseMarkers extends THREE.Points {
 
       // Sub-linear in weight: a synapse ten times stronger is not ten times
       // wider on screen, or one strong contact hides its neighbours entirely.
-      this.#sizes[kept] = 2 + Math.sqrt(Math.abs(synapses.weight[s])) * 1.6;
+      this.#sizes[kept] = 0.9 + Math.sqrt(Math.abs(synapses.weight[s])) * 0.7;
       kept += 1;
     }
 

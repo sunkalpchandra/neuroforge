@@ -100,7 +100,17 @@ export interface SimulationSettings {
   plasticityEnabled: boolean;
   /** Maximum substeps executed per animation frame, to bound frame time. */
   maxSubstepsPerFrame: number;
-  /** Compute backend preference. */
+  /**
+   * Compute backend preference.
+   *
+   * Defaults to the reference implementation rather than `auto`. The WebAssembly
+   * core agrees with the reference on every offline test — LIF and Izhikevich,
+   * with and without synapses, gap junctions included — but in the browser the
+   * same path leaves the network silent while time advances, and the startup
+   * probe does not reproduce it. Until that is understood, the default is the
+   * backend whose behaviour is verified end to end; `wasm` and `gpu` remain
+   * selectable.
+   */
   backend: 'auto' | 'gpu' | 'wasm' | 'cpu';
 }
 
@@ -112,8 +122,8 @@ export const DEFAULT_SIMULATION_SETTINGS: SimulationSettings = {
   noise: 0,
   seed: 0x9e3779b9,
   plasticityEnabled: false,
-  maxSubstepsPerFrame: 32,
-  backend: 'auto',
+  maxSubstepsPerFrame: 512,
+  backend: 'cpu',
 };
 
 /** Camera state persisted with the document so a reload restores the view. */
@@ -188,7 +198,7 @@ export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
   vignette: 0.2,
   chromaticAberration: 0,
   exposure: 1,
-  gridVisible: true,
+  gridVisible: false,
   gridFade: 0.55,
   showDendrites: true,
   showAxons: true,
@@ -276,6 +286,7 @@ export const RENDER_PRESET_PATCHES: Record<RenderPreset, Partial<RenderSettings>
     chromaticAberration: 0,
     exposure: 1,
     saturation: 1,
+    gridVisible: false,
   },
   cinematic: {
     bloomIntensity: 1.15,
